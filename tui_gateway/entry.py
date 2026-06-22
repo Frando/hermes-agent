@@ -48,6 +48,58 @@ def _install_sidecar_publisher() -> None:
     )
 
 
+def _install_iroh_share() -> None:
+    """Start the iroh share acceptor when ``HERMES_TUI_SHARE`` is set.
+
+    Enables the session fan-out synchronously so every session created in this
+    process is shareable, then boots the iroh endpoint on a background thread so
+    bind/relay latency never delays ``gateway.ready``. Posts the join tickets as
+    a sticky notice once the endpoint is up. Best-effort: a sharing failure never
+    breaks the TUI.
+    """
+    if (os.environ.get("HERMES_TUI_SHARE") or "").strip().lower() not in {
+        "1", "true", "yes", "on",
+    }:
+        return
+    try:
+        server.enable_sharing_fanout()
+    except Exception:
+        return
+
+    import threading as _share_threading
+
+    def _boot() -> None:
+        try:
+            from tui_gateway.iroh_share import IrohShareHost
+
+            host = IrohShareHost()
+            watch, control = host.start()
+            server._iroh_share_host = host  # keep a reference alive
+        except Exception as exc:
+            logger.warning("iroh share failed to start: %s", exc)
+            write_json({"jsonrpc": "2.0", "method": "event", "params": {
+                "type": "notification.show",
+                "payload": {
+                    "text": f"[share] could not start: {exc}",
+                    "kind": "sticky", "level": "warn",
+                },
+            }})
+            return
+        text = (
+            "Sharing this session over iroh.\n"
+            f"  watch:   hermes join {watch}\n"
+            f"  control: hermes join {control}"
+        )
+        write_json({"jsonrpc": "2.0", "method": "event", "params": {
+            "type": "notification.show",
+            "payload": {"text": text, "kind": "sticky", "level": "info"},
+        }})
+
+    _share_threading.Thread(
+        target=_boot, name="hermes-tui-share-boot", daemon=True
+    ).start()
+
+
 # How long to wait for orderly shutdown (atexit + finalisers) before
 # falling back to ``os._exit(0)`` so a wedged worker mid-flush can't
 # strand the process.  1s covers the gateway's own shutdown work
@@ -262,6 +314,7 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
 
 def main():
     _install_sidecar_publisher()
+    _install_iroh_share()
 
     # MCP tool discovery — runs in a background daemon thread so a slow or
     # unreachable MCP server can't freeze TUI startup.  Previously this ran

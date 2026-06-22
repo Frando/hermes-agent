@@ -434,8 +434,12 @@ class IrohShareHost:
         return c.name if c else "host"
 
     def _notice(self, text: str, only: Optional[_Client] = None) -> None:
-        frame = {"jsonrpc": "2.0", "method": "event",
-                 "params": {"type": "notice", "payload": {"text": f"[share] {text}"}}}
+        # notification.show is the gateway's toast channel; no session_id so the
+        # TUI does not drop it as belonging to another session. 'ttl' self-expires.
+        frame = {"jsonrpc": "2.0", "method": "event", "params": {
+            "type": "notification.show",
+            "payload": {"text": f"[share] {text}", "kind": "ttl", "ttl_ms": 6000, "level": "info"},
+        }}
         targets = [only] if only is not None else list(self._clients.values())
         for c in targets:
             try:
@@ -448,6 +452,118 @@ class IrohShareHost:
             await send.write_all((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
         except Exception:
             pass
+
+
+class JoinError(ShareError):
+    """A join (bridge) operation failed."""
+
+
+def start_join_bridge(ticket: str, name: str = "guest") -> tuple[int, Optional[str]]:
+    """Connect to a shared host over iroh and expose it as a local WebSocket.
+
+    Returns ``(port, session_id)``. The caller points the Ink TUI at
+    ``ws://127.0.0.1:<port>`` (HERMES_TUI_GATEWAY_URL) and resumes
+    ``session_id`` (HERMES_TUI_RESUME) so the real TUI renders the host's live
+    session. The bridge runs on a daemon thread for the lifetime of the process:
+    it pumps newline-JSON frames between the single local WS client (the TUI)
+    and the iroh connection, buffering host frames that arrive before the TUI
+    connects.
+    """
+    iroh = _require_iroh()
+    base, token = _split_ticket(ticket)
+    result: dict = {}
+    ready = threading.Event()
+
+    def _run() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_bridge_setup(iroh, base, token, name, result, loop))
+        except BaseException as exc:  # noqa: BLE001 - surfaced via the caller
+            result["error"] = exc
+            ready.set()
+            loop.close()
+            return
+        ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            loop.close()
+
+    threading.Thread(target=_run, name="hermes-join-bridge", daemon=True).start()
+    ready.wait(timeout=40)
+    if result.get("error") is not None:
+        raise JoinError(f"could not join: {result['error']}") from result["error"]
+    if "port" not in result:
+        raise JoinError("join bridge did not start in time")
+    return result["port"], result.get("session_id")
+
+
+async def _bridge_setup(iroh, base, token, name, result, loop) -> None:
+    import websockets
+
+    endpoint = await iroh.Endpoint.bind(
+        iroh.EndpointOptions(preset=iroh.preset_n0(), alpns=[ALPN])
+    )
+    conn = await endpoint.connect(iroh.EndpointTicket.from_string(base).endpoint_addr(), ALPN)
+    bi = await conn.open_bi()
+    recv, send = bi.recv(), bi.send()
+    reader = _LineReader(recv)
+
+    await send.write_all(
+        (json.dumps({"type": "hello", "token": token, "name": name}) + "\n").encode("utf-8")
+    )
+    welcome = await reader.next()
+    if not welcome or welcome.get("type") == "error":
+        raise JoinError((welcome or {}).get("message", "host refused the connection"))
+    result["session_id"] = welcome.get("session_id")
+
+    state: dict = {"ws": None, "buffer": []}
+
+    async def ws_handler(ws, *_args):
+        state["ws"] = ws
+        for line in state["buffer"]:
+            await ws.send(line)
+        state["buffer"].clear()
+        try:
+            async for message in ws:
+                await send.write_all((message.strip() + "\n").encode("utf-8"))
+        except Exception:
+            pass
+        finally:
+            state["ws"] = None
+            loop.stop()  # the TUI closed; tear the bridge down
+
+    ws_server = await websockets.serve(ws_handler, "127.0.0.1", 0)
+    result["port"] = ws_server.sockets[0].getsockname()[1]
+
+    # Keep the iroh endpoint, connection, streams, and WS server referenced for
+    # the life of the bridge thread. Without this they are local to this
+    # coroutine, which returns immediately, and would be garbage-collected,
+    # closing the iroh connection and the WS listener out from under the pump.
+    result["_keepalive"] = (endpoint, conn, send, recv, ws_server)
+
+    async def _pump() -> None:
+        while True:
+            frame = await reader.next()
+            if frame is None:
+                if state["ws"] is not None:
+                    try:
+                        await state["ws"].close()
+                    except Exception:
+                        pass
+                loop.stop()
+                return
+            line = json.dumps(frame, ensure_ascii=False)
+            if state["ws"] is not None:
+                try:
+                    await state["ws"].send(line)
+                    continue
+                except Exception:
+                    pass
+            state["buffer"].append(line)
+
+    loop.create_task(_pump())
 
 
 def _sanitize(text: str) -> str:
