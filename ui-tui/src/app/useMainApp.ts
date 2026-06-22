@@ -271,6 +271,22 @@ export function useMainApp(gw: GatewayClient) {
   })
 
   const { actions: composerActions, refs: composerRefs, state: composerState } = composer
+  // Keep the active sharing banner present. share.info persists the tickets in
+  // ui.shareInfo; the startup intro render replaces the transcript, which would
+  // wipe a banner appended before it, so re-assert it idempotently whenever it
+  // is missing (returning the same array when present avoids a render loop).
+  useEffect(() => {
+    if (!ui.shareInfo) {
+      return
+    }
+
+    const text = ui.shareInfo
+
+    setHistoryItems(prev =>
+      prev.some(m => m.kind === 'share') ? prev : [...prev, { kind: 'share', role: 'system', text }]
+    )
+  }, [ui.shareInfo, historyItems])
+
   const empty = !historyItems.some(msg => msg.kind !== 'intro')
 
   useEffect(() => {

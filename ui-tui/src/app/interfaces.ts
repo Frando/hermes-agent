@@ -171,6 +171,9 @@ export interface UiState {
   pasteCollapseChars: number
 
   sections: SectionVisibility
+  // Active sharing info (the /share text) when started with `hermes share`; the
+  // transcript re-asserts it so the startup intro render cannot wipe it.
+  shareInfo: null | string
   sessionTitle: string
   showCost: boolean
   showReasoning: boolean

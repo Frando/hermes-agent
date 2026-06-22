@@ -113,7 +113,7 @@ export interface ClarifyReq {
 
 export interface Msg {
   info?: SessionInfo
-  kind?: 'diff' | 'intro' | 'panel' | 'slash' | 'trail'
+  kind?: 'diff' | 'intro' | 'panel' | 'share' | 'slash' | 'trail'
   panelData?: PanelData
   role: Role
   text: string

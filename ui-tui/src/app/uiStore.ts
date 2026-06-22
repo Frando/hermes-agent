@@ -22,6 +22,7 @@ const buildUiState = (): UiState => ({
   pasteCollapseLines: 5,
   pasteCollapseChars: 2000,
   sections: {},
+  shareInfo: null,
   sessionTitle: '',
   showCost: false,
   showReasoning: false,
