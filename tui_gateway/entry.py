@@ -85,14 +85,18 @@ def _install_iroh_share() -> None:
                 },
             }})
             return
+        # Emit share.info so the TUI prints the tickets in the transcript on
+        # startup, exactly as if /share had been typed (rather than a transient
+        # toast). Only the host's own client is attached at boot, so the control
+        # ticket is not exposed to joiners.
         text = (
             "Sharing this session over iroh.\n"
             f"  watch:   hermes join {watch}\n"
             f"  control: hermes join {control}"
         )
         write_json({"jsonrpc": "2.0", "method": "event", "params": {
-            "type": "notification.show",
-            "payload": {"text": text, "kind": "sticky", "level": "info"},
+            "type": "share.info",
+            "payload": {"text": text},
         }})
 
     _share_threading.Thread(
