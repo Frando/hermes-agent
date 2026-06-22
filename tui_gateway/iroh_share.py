@@ -414,7 +414,18 @@ class IrohShareHost:
             if self._is_grab(method, req.get("params")):
                 ok = self._grab(client)
                 if rid is not None:
-                    client.transport.write({"jsonrpc": "2.0", "id": rid, "result": {"ok": ok}})
+                    # Reply in the exec-dispatch shape so the TUI renders the
+                    # outcome as a visible line for both slash.exec and
+                    # command.dispatch (a bare {ok} showed as "no output").
+                    text = (
+                        "You now control this session. Type to drive the agent."
+                        if ok else
+                        "This is a watch-only ticket; you cannot take control."
+                    )
+                    client.transport.write({
+                        "jsonrpc": "2.0", "id": rid,
+                        "result": {"type": "exec", "output": text},
+                    })
                 continue
 
             # Pin the joiner to the shared session: a request naming any other
