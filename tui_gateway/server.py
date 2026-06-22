@@ -227,6 +227,10 @@ _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
 # must not fall through there while the session waits for resume or reap.
 _detached_ws_transport = _DropTransport()
 
+# Set by entry._install_iroh_share when the gateway starts in share mode; holds
+# the live IrohShareHost so share.tickets can report the current join tickets.
+_iroh_share_host = None
+
 
 class _SlashWorker:
     """Persistent HermesCLI subprocess for slash commands."""
@@ -9268,6 +9272,20 @@ def _(rid, params: dict) -> dict:
             )
 
     return _err(rid, 4018, f"not a quick/plugin/skill command: {name}")
+
+
+@method("share.tickets")
+def _(rid, params: dict) -> dict:
+    """Return the current iroh share tickets, so /share can reprint them.
+
+    Reports ``sharing: False`` when the gateway is not running in share mode.
+    """
+    host = _iroh_share_host
+    tickets = getattr(host, "tickets", None) if host is not None else None
+    if not tickets:
+        return _ok(rid, {"sharing": False})
+    watch, control = tickets
+    return _ok(rid, {"sharing": True, "watch": watch, "control": control})
 
 
 # ── Methods: paste ────────────────────────────────────────────────────

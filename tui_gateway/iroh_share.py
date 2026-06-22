@@ -241,6 +241,11 @@ class IrohShareHost:
             raise ShareError("sharing endpoint did not start in time")
         return self._tickets
 
+    @property
+    def tickets(self) -> Optional[tuple[str, str]]:
+        """The (watch, control) tickets once bound, else None."""
+        return self._tickets
+
     def stop(self) -> None:
         self._closing = True
         loop = self._loop

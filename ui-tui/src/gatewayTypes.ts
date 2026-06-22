@@ -53,6 +53,12 @@ export interface CreditsViewResponse {
   topup_url: string | null
 }
 
+export interface ShareTicketsResponse {
+  control?: string
+  sharing: boolean
+  watch?: string
+}
+
 // ── Terminal billing (Phase 2b) ──────────────────────────────────────
 
 export interface BillingCardInfo {

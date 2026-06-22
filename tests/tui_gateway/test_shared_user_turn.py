@@ -22,6 +22,23 @@ class _Recorder:
         self._closed = True
 
 
+def test_share_tickets_reports_not_sharing(monkeypatch):
+    monkeypatch.setattr(server, "_iroh_share_host", None)
+    resp = server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "share.tickets", "params": {}})
+    assert resp["result"] == {"sharing": False}
+
+
+def test_share_tickets_reports_current_tickets(monkeypatch):
+    class _FakeHost:
+        tickets = ("WATCH-TICKET", "CONTROL-TICKET")
+
+    monkeypatch.setattr(server, "_iroh_share_host", _FakeHost())
+    resp = server.dispatch({"jsonrpc": "2.0", "id": 2, "method": "share.tickets", "params": {}})
+    assert resp["result"] == {
+        "sharing": True, "watch": "WATCH-TICKET", "control": "CONTROL-TICKET",
+    }
+
+
 def test_prompt_submit_echoes_user_turn_to_others(monkeypatch):
     # Record the global stdio transport so the fan-out swap is restored.
     monkeypatch.setattr(server, "_stdio_transport", server._stdio_transport)
