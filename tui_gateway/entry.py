@@ -53,10 +53,10 @@ def _install_iroh_share() -> None:
 
     Upgrades the process stdio transport to a fan-out so any session can take on
     joiners, and creates the share host. The iroh endpoint is NOT bound here: it
-    binds lazily the first time a session is shared, so a user who never shares
-    pays no iroh cost. ``hermes share`` still launches with the first session
-    shared, which the TUI drives by issuing ``share.start`` once it is ready.
-    Best-effort: a setup failure never breaks the TUI.
+    binds lazily the first time a session is shared with ``/share``, so a user who
+    never shares pays no iroh cost. Every ``hermes --tui`` session can share
+    itself; there is no separate launch command. Best-effort: a setup failure
+    never breaks the TUI.
     """
     try:
         server.enable_sharing_fanout()

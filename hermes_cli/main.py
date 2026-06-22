@@ -278,7 +278,7 @@ from hermes_cli.subcommands.status import build_status_parser
 from hermes_cli.subcommands.webhook import build_webhook_parser
 from hermes_cli.subcommands.hooks import build_hooks_parser
 from hermes_cli.subcommands.doctor import build_doctor_parser
-from hermes_cli.subcommands.share import build_share_parser
+from hermes_cli.subcommands.share import build_join_parser
 from hermes_cli.subcommands.security import build_security_parser
 from hermes_cli.subcommands.dump import build_dump_parser
 from hermes_cli.subcommands.debug import build_debug_parser
@@ -4262,12 +4262,6 @@ def cmd_doctor(args):
     from hermes_cli.doctor import run_doctor
 
     run_doctor(args)
-
-
-def cmd_share(args):
-    """Launch the TUI with session sharing over iroh enabled."""
-    os.environ["HERMES_TUI_SHARE"] = "1"
-    _launch_tui(tui_dev=getattr(args, "dev", False))
 
 
 def cmd_join(args):
@@ -11454,7 +11448,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
         "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
         "prompt-size",
-        "send", "sessions", "setup", "share", "join",
+        "send", "sessions", "setup", "join",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
@@ -12204,7 +12198,7 @@ def main():
     # =========================================================================
     # share / join commands (parser in hermes_cli/subcommands/share.py)
     # =========================================================================
-    build_share_parser(subparsers, cmd_share=cmd_share, cmd_join=cmd_join)
+    build_join_parser(subparsers, cmd_join=cmd_join)
 
     # =========================================================================
     # security command — on-demand supply-chain audit
