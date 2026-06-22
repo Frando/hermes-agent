@@ -85,6 +85,32 @@ def test_fanout_remove():
     assert primary.frames == [{"n": 1}]
 
 
+def test_write_to_others_excludes_an_extra():
+    # A joiner submits: host (primary) + other extras see it; the submitter does not.
+    primary = _RecordingTransport()
+    submitter = _RecordingTransport()
+    other = _RecordingTransport()
+    fan = FanoutTransport(primary)
+    fan.add(submitter)
+    fan.add(other)
+    fan.write_to_others({"n": 1}, exclude=submitter)
+    assert primary.frames == [{"n": 1}]
+    assert other.frames == [{"n": 1}]
+    assert submitter.frames == []
+
+
+def test_write_to_others_excluding_fanout_skips_primary():
+    # The host submits: current_transport() IS the fan-out, so the primary
+    # (host's own UI) is skipped and only the joiners receive the echo.
+    primary = _RecordingTransport()
+    joiner = _RecordingTransport()
+    fan = FanoutTransport(primary)
+    fan.add(joiner)
+    fan.write_to_others({"n": 1}, exclude=fan)
+    assert primary.frames == []        # host already rendered its own prompt
+    assert joiner.frames == [{"n": 1}]
+
+
 def test_fanout_close_releases_extras_not_primary():
     primary = _RecordingTransport()
     a = _RecordingTransport()

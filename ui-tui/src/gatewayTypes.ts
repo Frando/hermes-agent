@@ -613,6 +613,7 @@ export type GatewayEvent =
   | { payload: SessionInfo; session_id?: string; type: 'session.info' }
   | { payload?: { text?: string }; session_id?: string; type: 'thinking.delta' }
   | { payload?: undefined; session_id?: string; type: 'message.start' }
+  | { payload: { text?: string }; session_id?: string; type: 'message.user' }
   | { payload?: { kind?: string; text?: string }; session_id?: string; type: 'status.update' }
   | {
       payload?: {

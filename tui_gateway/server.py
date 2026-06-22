@@ -725,6 +725,31 @@ def _bind_session_transport(session: dict, transport: Optional[Transport]) -> No
         session["transport"] = transport
 
 
+def _broadcast_user_turn(
+    session: dict, sid: str, text: Any, submitter: Optional[Transport]
+) -> None:
+    """Show a submitted prompt to the OTHER participants of a shared session.
+
+    Each client renders its own prompt optimistically, so the originator is
+    excluded to avoid a duplicate. A no-op for an unshared session (the slot is
+    not a fan-out), so the solo path is unaffected.
+    """
+    fanout = session.get("transport")
+    if not isinstance(fanout, FanoutTransport):
+        return
+    rendered = _inflight_text(text)
+    if not rendered:
+        return
+    fanout.write_to_others(
+        {
+            "jsonrpc": "2.0",
+            "method": "event",
+            "params": {"type": "message.user", "session_id": sid, "payload": {"text": rendered}},
+        },
+        submitter,
+    )
+
+
 def _session_is_evictable(sid: str, session: dict, now: float) -> bool:
     if session.get("running") or _session_pending_kind(sid):
         return False
@@ -6317,6 +6342,10 @@ def _(rid, params: dict) -> dict:
         session["running"] = True
         session["last_active"] = time.time()
         _start_inflight_turn(session, text)
+
+    # If shared, echo this prompt to the other participants so they see it
+    # inline (each client renders its own prompt locally, so exclude the sender).
+    _broadcast_user_turn(session, sid, text, current_transport())
 
     # Persist the DB row lazily, now that the user has actually sent a message.
     _ensure_session_db_row(session)

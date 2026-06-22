@@ -9,8 +9,8 @@ import type {
   GatewaySkin,
   SessionMostRecentResponse
 } from '../gatewayTypes.js'
-import { rpcErrorMessage } from '../lib/rpc.js'
 import { openExternalUrl } from '../lib/openExternalUrl.js'
+import { rpcErrorMessage } from '../lib/rpc.js'
 import { topLevelSubagents } from '../lib/subagentTree.js'
 import { formatAbandonedClarify, formatToolCall, stripAnsi } from '../lib/text.js'
 import { fromSkin } from '../theme.js'
@@ -456,6 +456,20 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         turnController.startMessage()
 
         return
+      case 'message.user': {
+        // Another participant in a shared session submitted a prompt. The
+        // gateway only sends this to clients OTHER than the sender (the sender
+        // renders its own prompt optimistically), so render it inline as a user
+        // turn. Solo sessions never receive this event.
+        const text = ev.payload?.text
+
+        if (typeof text === 'string' && text) {
+          appendMessage({ role: 'user', text })
+        }
+
+        return
+      }
+
       case 'status.update': {
         const p = ev.payload
 
@@ -550,13 +564,16 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         sys('💳 Open this link to grant terminal billing access:')
         sys(url)
+
         if (code) {
           sys(`If prompted, enter code: ${code}`)
         }
+
         void openExternalUrl(url)
 
         return
       }
+
       case 'gateway.stderr': {
         const line = String(ev.payload.line).slice(0, 120)
 

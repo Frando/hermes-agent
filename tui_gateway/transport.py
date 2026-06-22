@@ -283,6 +283,39 @@ class FanoutTransport:
                         pass
         return ok
 
+    def write_to_others(self, obj: dict, exclude: "Transport") -> None:
+        """Write to every member except ``exclude`` (best-effort).
+
+        Used to echo one client's action (a submitted prompt) to the other
+        participants without sending it back to the originator, which has
+        already rendered it locally. Passing the fan-out itself (or its primary)
+        as ``exclude`` skips the primary, which is how the host's own submit
+        reaches the joiners but not the host.
+        """
+        if exclude is not self._primary and exclude is not self:
+            try:
+                self._primary.write(obj)
+            except Exception:
+                pass
+        with self._lock:
+            extras = list(self._extras)
+        dead: list["Transport"] = []
+        for member in extras:
+            if member is exclude:
+                continue
+            try:
+                if not member.write(obj):
+                    dead.append(member)
+            except Exception:
+                dead.append(member)
+        if dead:
+            with self._lock:
+                for member in dead:
+                    try:
+                        self._extras.remove(member)
+                    except ValueError:
+                        pass
+
     def close(self) -> None:
         self._closed = True
         with self._lock:
