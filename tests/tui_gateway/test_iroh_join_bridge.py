@@ -52,6 +52,9 @@ def test_join_bridge_end_to_end(monkeypatch):
 
     host = sh.IrohShareHost()
     _watch, control = host.start(online_timeout=2)
+    # Connect over loopback in tests: id-only tickets need network discovery,
+    # so dial the host's real direct address instead.
+    monkeypatch.setattr(sh, "_connect_addr", lambda _i, _b: host._endpoint.addr())
     try:
         port, joined_sid = sh.start_join_bridge(control, name="bridge-test")
         # The bridge surfaces the resume key (what HERMES_TUI_RESUME needs).

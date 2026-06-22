@@ -31,7 +31,10 @@ from tui_gateway import server
 logger = logging.getLogger(__name__)
 
 ALPN = b"hermes/tui-share/1"
-_TICKET_SEP = "~"
+# A ticket is "<endpoint-id>/<token>": the 64-hex endpoint id (resolved to
+# addresses by iroh discovery, so no addresses are embedded) and a role token.
+# Neither part contains a slash, so the last slash separates them.
+_TICKET_SEP = "/"
 _READ_CHUNK = 64 * 1024
 _MAX_LINE_BYTES = 1024 * 1024
 _MAX_CLIENTS = 32
@@ -80,8 +83,8 @@ def _require_iroh():
         import iroh
     except ImportError as exc:
         raise ShareUnavailable(
-            "Session sharing needs the 'iroh' package. "
-            "Install it with: pip install 'hermes-agent[share]'"
+            "Session sharing needs the 'iroh' package (a core dependency). "
+            "Reinstall hermes-agent, or: pip install iroh"
         ) from exc
     return iroh
 
@@ -94,6 +97,16 @@ def _split_ticket(shared: str) -> tuple[str, str]:
     if not base or not token:
         raise ValueError("not a valid share ticket")
     return base, token
+
+
+def _connect_addr(iroh, endpoint_id: str):
+    """Build the iroh address to dial from a ticket's endpoint id.
+
+    Only the endpoint id is carried in a ticket; its actual addresses are
+    resolved by iroh discovery at connect time. Tests monkeypatch this to return
+    a known direct address so they can connect over loopback without discovery.
+    """
+    return iroh.EndpointAddr(iroh.EndpointId.from_string(endpoint_id), None, [])
 
 
 class _LineReader:
@@ -288,7 +301,7 @@ class IrohShareHost:
             await asyncio.wait_for(self._endpoint.online(), timeout=online_timeout)
         except Exception:
             pass
-        base = str(iroh.EndpointTicket.from_addr(self._endpoint.addr()))
+        base = str(self._endpoint.id())
         self._tickets = (
             f"{base}{_TICKET_SEP}{self._watch_token}",
             f"{base}{_TICKET_SEP}{self._control_token}",
@@ -639,7 +652,7 @@ async def _bridge_setup(iroh, base, token, name, result, loop) -> None:
     endpoint = await iroh.Endpoint.bind(
         iroh.EndpointOptions(preset=iroh.preset_n0(), alpns=[ALPN])
     )
-    conn = await endpoint.connect(iroh.EndpointTicket.from_string(base).endpoint_addr(), ALPN)
+    conn = await endpoint.connect(_connect_addr(iroh, base), ALPN)
     bi = await conn.open_bi()
     recv, send = bi.recv(), bi.send()
     reader = _LineReader(recv)

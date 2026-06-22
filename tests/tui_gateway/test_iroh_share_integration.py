@@ -22,7 +22,7 @@ async def _raw_client(ticket, requests):
     ep = await iroh.Endpoint.bind(
         iroh.EndpointOptions(preset=iroh.preset_n0_disable_relay(), alpns=[sh.ALPN])
     )
-    conn = await ep.connect(iroh.EndpointTicket.from_string(base).endpoint_addr(), sh.ALPN)
+    conn = await ep.connect(sh._connect_addr(iroh, base), sh.ALPN)
     bi = await conn.open_bi()
     recv, send = bi.recv(), bi.send()
     reader = sh._LineReader(recv)
@@ -71,6 +71,9 @@ def test_iroh_joiner_attaches_and_receives_fanout(monkeypatch):
 
     host = sh.IrohShareHost()
     _watch, control = host.start(online_timeout=2)
+    # Connect over loopback in tests: id-only tickets need network discovery,
+    # so dial the host's real direct address instead.
+    monkeypatch.setattr(sh, "_connect_addr", lambda _i, _b: host._endpoint.addr())
     try:
         frames = asyncio.run(_raw_client(
             control,

@@ -20,14 +20,14 @@ def _client(role, cid="c1", name="x"):
 
 
 def test_split_ticket():
-    base, tok = sh._split_ticket("endpointabc~secret")
-    assert base == "endpointabc"
+    base, tok = sh._split_ticket("deadbeef0123/secret")
+    assert base == "deadbeef0123"
     assert tok == "secret"
 
 
 def test_split_ticket_uses_last_separator():
-    base, tok = sh._split_ticket("a~b~tok")
-    assert (base, tok) == ("a~b", "tok")
+    base, tok = sh._split_ticket("a/b/tok")
+    assert (base, tok) == ("a/b", "tok")
 
 
 def test_sanitize_strips_controls():
