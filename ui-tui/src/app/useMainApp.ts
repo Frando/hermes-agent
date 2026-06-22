@@ -271,26 +271,6 @@ export function useMainApp(gw: GatewayClient) {
   })
 
   const { actions: composerActions, refs: composerRefs, state: composerState } = composer
-  // Keep the active sharing banner present. share.info persists the tickets in
-  // ui.shareInfo; the startup intro render replaces the transcript, which would
-  // wipe a banner appended before it, so re-assert it idempotently whenever it
-  // is missing (returning the same array when present avoids a render loop).
-  useEffect(() => {
-    if (!ui.shareInfo) {
-      // Sharing stopped (/unshare): drop the banner if present.
-      setHistoryItems(prev =>
-        prev.some(m => m.kind === 'share') ? prev.filter(m => m.kind !== 'share') : prev
-      )
-
-      return
-    }
-
-    const text = ui.shareInfo
-
-    setHistoryItems(prev =>
-      prev.some(m => m.kind === 'share') ? prev : [...prev, { kind: 'share', role: 'system', text }]
-    )
-  }, [ui.shareInfo, historyItems])
 
   const empty = !historyItems.some(msg => msg.kind !== 'intro')
 
@@ -625,26 +605,6 @@ export function useMainApp(gw: GatewayClient) {
       stdout.off('resize', onResize)
     }
   }, [rpc, stdout, ui.sid])
-
-  // `hermes share` launches with HERMES_TUI_SHARE set: share the initial session
-  // automatically once it is ready, as if /share had been typed. share.start is
-  // idempotent and the gateway emits the banner, so firing once is enough.
-  const autoSharedRef = useRef(false)
-
-  useEffect(() => {
-    if (autoSharedRef.current || !ui.sid) {
-      return
-    }
-
-    const want = (process.env.HERMES_TUI_SHARE ?? '').trim().toLowerCase()
-
-    if (want !== '1' && want !== 'true' && want !== 'yes' && want !== 'on') {
-      return
-    }
-
-    autoSharedRef.current = true
-    void rpc('share.start', { session_id: ui.sid })
-  }, [rpc, ui.sid])
 
   const answerClarify = useCallback(
     (answer: string) => {

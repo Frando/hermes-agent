@@ -1,20 +1,43 @@
 import type { ShareTicketsResponse } from '../../../gatewayTypes.js'
-import { patchUiState } from '../../uiStore.js'
 import type { SlashCommand } from '../types.js'
+
+// Set by `hermes join <ticket>`: the ticket this TUI joined with. Its presence
+// means this is a joined (remote) session, which cannot itself be reshared or
+// unshared — only the host controls that.
+const joinTicket = (): string => (process.env.HERMES_TUI_JOIN_TICKET ?? '').trim()
+
+const ticketLines = (watch: string, control: string): string =>
+  [
+    'Sharing this session over iroh.',
+    `  watch:   hermes join ${watch}`,
+    `  control: hermes join ${control}`
+  ].join('\n')
 
 export const shareCommands: SlashCommand[] = [
   {
     help: 'Share this session and show its join tickets',
     name: 'share',
     run: (_arg, ctx) => {
-      // share.start mints this session's tokens and binds the shared endpoint on
-      // first use. On success the gateway emits a share.info event (routed to the
-      // host only), which renders the banner, so there is nothing to print here.
+      const joined = joinTicket()
+
+      if (joined) {
+        ctx.transcript.sys(
+          `You joined this session, so you can't reshare it.\n  joined with: hermes join ${joined}`
+        )
+
+        return
+      }
+
+      // share.start is idempotent: the first call mints this session's tokens
+      // and binds the shared endpoint; later calls return the same tickets. Print
+      // them on every call so re-running /share reshows the join commands.
       ctx.gateway
         .rpc<ShareTicketsResponse>('share.start', { session_id: ctx.sid })
         .then(
           ctx.guarded<ShareTicketsResponse>(res => {
-            if (!res.sharing) {
+            if (res.sharing && res.watch && res.control) {
+              ctx.transcript.sys(ticketLines(res.watch, res.control))
+            } else {
               ctx.transcript.sys('Could not share this session.')
             }
           })
@@ -26,13 +49,16 @@ export const shareCommands: SlashCommand[] = [
     help: 'Stop sharing this session',
     name: 'unshare',
     run: (_arg, ctx) => {
+      if (joinTicket()) {
+        ctx.transcript.sys('You joined this session; only the host can stop sharing it.')
+
+        return
+      }
+
       ctx.gateway
         .rpc<ShareTicketsResponse>('share.stop', { session_id: ctx.sid })
         .then(
           ctx.guarded<ShareTicketsResponse>(res => {
-            // Clear the banner so the self-heal effect drops it and stops
-            // re-asserting it.
-            patchUiState({ shareInfo: null })
             ctx.transcript.sys(
               res.was_sharing
                 ? 'Stopped sharing this session.'

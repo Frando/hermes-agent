@@ -163,6 +163,55 @@ def test_control_is_per_session():
     assert h._authorized(cb_view, "prompt.submit") is False
 
 
+def _started_host():
+    # A host with the endpoint pretend-bound, so share_session runs without
+    # touching iroh (ensure_started returns immediately when _started is set).
+    h = sh.IrohShareHost()
+    h._started = True
+    h._endpoint_b32 = "endpointbase"
+    return h
+
+
+def test_share_session_is_idempotent():
+    # Sharing the same session twice returns the SAME tickets, so a repeated
+    # /share reprints the existing join commands rather than re-minting tokens.
+    h = _started_host()
+    first = h.share_session("sid1", "key1")
+    second = h.share_session("sid1", "key1")
+    assert first == second
+    watch, control = first
+    assert watch != control
+    assert h.shared_count == 1
+    assert h._lookup_token(watch.rsplit("/", 1)[1]) == (h._shared["key1"], sh.ROLE_WATCH)
+    assert h._lookup_token(control.rsplit("/", 1)[1]) == (h._shared["key1"], sh.ROLE_CONTROL)
+
+
+def test_unshare_then_share_mints_new_tokens():
+    h = _started_host()
+    watch1, control1 = h.share_session("sid1", "key1")
+    assert h.unshare_session("key1") is True
+    assert h.unshare_session("key1") is False  # already unshared
+    assert h.shared_count == 0
+    # Old tokens stop resolving once unshared.
+    assert h._lookup_token(watch1.rsplit("/", 1)[1]) == (None, None)
+    # Re-sharing mints fresh tokens: a new share is a new grant.
+    watch2, control2 = h.share_session("sid1", "key1")
+    assert watch2 != watch1
+    assert control2 != control1
+    assert h._lookup_token(watch2.rsplit("/", 1)[1])[1] == sh.ROLE_WATCH
+
+
+def test_multiple_sessions_share_one_endpoint():
+    # Per-session tokens off one shared endpoint id.
+    h = _started_host()
+    w1, c1 = h.share_session("sidA", "keyA")
+    w2, c2 = h.share_session("sidB", "keyB")
+    assert h.shared_count == 2
+    assert {t.rsplit("/", 1)[0] for t in (w1, c1, w2, c2)} == {"endpointbase"}
+    assert h._lookup_token(w1.rsplit("/", 1)[1])[0].key == "keyA"
+    assert h._lookup_token(c2.rsplit("/", 1)[1])[0].key == "keyB"
+
+
 def test_host_is_default_controller_and_can_grab_back():
     # The stdio (fan-out) transport is the controller by default for a shared
     # session; a joiner grab transfers it; grab_host reclaims it.

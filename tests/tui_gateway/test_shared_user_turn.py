@@ -79,6 +79,30 @@ def test_share_status_omits_control_for_non_host(monkeypatch):
     assert "control" not in resp["result"]
 
 
+def test_share_stop_is_host_only(monkeypatch):
+    # A joiner (driving through its own transport) must not be able to unshare
+    # the host's session; only the stdio host can.
+    monkeypatch.setattr(server, "_stdio_transport", server._stdio_transport)
+    server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "session.create", "params": {}})
+    sid = server.active_shared_session_id()
+    key = server._sessions[sid]["session_key"]
+    host, _shared = _register_shared(monkeypatch, sid, key)
+
+    joiner = _Recorder()
+    denied = server.dispatch(
+        {"jsonrpc": "2.0", "id": 2, "method": "share.stop", "params": {"session_id": sid}},
+        transport=joiner,
+    )
+    assert denied.get("error", {}).get("code") == 4030
+    assert host.is_shared(key)  # still shared after the refused joiner request
+
+    ok = server.dispatch(
+        {"jsonrpc": "2.0", "id": 3, "method": "share.stop", "params": {"session_id": sid}},
+    )
+    assert ok["result"]["was_sharing"] is True
+    assert not host.is_shared(key)
+
+
 def test_prompt_submit_gated_by_shared_controller(monkeypatch):
     """The host (stdio submitter) is refused while a joiner holds control of
     that session, and may submit again after grabbing control back."""

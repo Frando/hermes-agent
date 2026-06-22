@@ -456,19 +456,6 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         turnController.startMessage()
 
         return
-      case 'share.info': {
-        // Sharing started (hermes share). Persist the tickets; the transcript
-        // re-asserts them as a system message (see useMainApp), so the startup
-        // intro render can't wipe them.
-        const text = ev.payload?.text
-
-        if (typeof text === 'string' && text) {
-          patchUiState({ shareInfo: text })
-        }
-
-        return
-      }
-
       case 'message.user': {
         // Another participant in a shared session submitted a prompt. The
         // gateway only sends this to clients OTHER than the sender (the sender

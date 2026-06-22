@@ -9323,26 +9323,6 @@ def _(rid, params: dict) -> dict:
     return _err(rid, 4018, f"not a quick/plugin/skill command: {name}")
 
 
-def _share_info_text(watch: str, control: str) -> str:
-    return (
-        "Sharing this session over iroh.\n"
-        f"  watch:   hermes join {watch}\n"
-        f"  control: hermes join {control}"
-    )
-
-
-def _emit_share_info(watch: str, control: str) -> None:
-    """Print the join tickets to the HOST's own stdout only.
-
-    The tickets carry the secret control token, so this goes to the fan-out's
-    primary (the host's terminal) and never through the fan-out, where a joiner
-    could see it. The TUI renders the ``share.info`` event as the share banner.
-    """
-    fanout = _stdio_transport
-    primary = getattr(fanout, "primary", fanout)
-    primary.write({"jsonrpc": "2.0", "method": "event", "params": {
-        "type": "share.info", "payload": {"text": _share_info_text(watch, control)},
-    }})
 
 
 def _session_key_from_params(params: dict) -> tuple[Optional[dict], str]:
@@ -9380,16 +9360,28 @@ def _(rid, params: dict) -> dict:
     except Exception as exc:
         logger.warning("share: failed to start sharing: %s", exc)
         return _err(rid, 5001, f"could not start sharing: {exc}")
-    _emit_share_info(watch, control)
+    # The tickets ride back in this response (host transport only; responses are
+    # not fanned out to joiners), and the TUI's /share prints them. No share.info
+    # event: there is no longer a startup auto-share that would need a banner.
     return _ok(rid, {"sharing": True, "watch": watch, "control": control})
 
 
 @method("share.stop")
 def _(rid, params: dict) -> dict:
-    """Stop sharing the current session and disconnect its joiners."""
+    """Stop sharing the current session and disconnect its joiners.
+
+    Host-only: a joiner (even one holding control) must not be able to unshare
+    the host's session out from under everyone. A joiner drives through its own
+    client transport, never the process stdio transport, so the check below
+    rejects it.
+    """
     host = _iroh_share_host
+    if host is None:
+        return _err(rid, 4001, "sharing is not available in this build")
+    if current_transport() is not _stdio_transport:
+        return _err(rid, 4030, "only the host can stop sharing a session")
     _session, key = _session_key_from_params(params)
-    was = bool(host is not None and key and host.unshare_session(key))
+    was = bool(key and host.unshare_session(key))
     return _ok(rid, {"sharing": False, "was_sharing": was})
 
 

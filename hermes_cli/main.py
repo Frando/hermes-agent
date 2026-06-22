@@ -4290,6 +4290,9 @@ def cmd_join(args):
         )
         sys.exit(1)
     os.environ["HERMES_TUI_GATEWAY_URL"] = f"ws://127.0.0.1:{port}"
+    # Tell the TUI it is a joined (remote) session, and with which ticket, so
+    # /share and /unshare explain they cannot reshare a session they joined.
+    os.environ["HERMES_TUI_JOIN_TICKET"] = args.ticket
     _launch_tui(resume_session_id=session_id, tui_dev=getattr(args, "dev", False))
 
 
