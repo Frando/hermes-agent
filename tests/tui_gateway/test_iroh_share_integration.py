@@ -59,6 +59,9 @@ async def _raw_client(ticket, requests):
 
 def test_iroh_joiner_attaches_and_receives_fanout(monkeypatch):
     monkeypatch.setattr(iroh, "preset_n0", iroh.preset_n0_disable_relay)
+    # enable_sharing_fanout swaps the module-global stdio transport; record it
+    # so monkeypatch restores it and the swap does not leak into other tests.
+    monkeypatch.setattr(server, "_stdio_transport", server._stdio_transport)
     server.enable_sharing_fanout()
     # Create a host session bound to the shared fan-out (transport=None binds
     # the global stdio transport, which enable_sharing_fanout made a fan-out).

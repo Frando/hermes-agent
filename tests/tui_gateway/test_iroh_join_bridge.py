@@ -42,6 +42,9 @@ async def _ws_client(port, requests):
 
 def test_join_bridge_end_to_end(monkeypatch):
     monkeypatch.setattr(iroh, "preset_n0", iroh.preset_n0_disable_relay)
+    # Record the module-global stdio transport so monkeypatch restores it; the
+    # fan-out swap must not leak into other tests in the same process.
+    monkeypatch.setattr(server, "_stdio_transport", server._stdio_transport)
     server.enable_sharing_fanout()
     server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "session.create", "params": {}})
     sid = server.active_shared_session_id()
