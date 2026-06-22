@@ -23,6 +23,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import secrets
 import threading
 from typing import Optional
@@ -79,6 +80,30 @@ class ShareUnavailable(ShareError):
     """The optional ``iroh`` dependency is not installed."""
 
 
+_iroh_log_configured = False
+
+
+def _maybe_configure_iroh_logging(iroh) -> None:
+    """Turn on iroh's own tracing when ``HERMES_IROH_LOG`` names a level.
+
+    iroh logs to stderr, which for the gateway is the log channel (stdout is
+    reserved for JSON-RPC), so this is a safe opt-in debug aid for connection
+    problems. Accepts off/error/warn/info/debug/trace; anything else is ignored.
+    """
+    global _iroh_log_configured
+    if _iroh_log_configured:
+        return
+    _iroh_log_configured = True
+    level = (os.environ.get("HERMES_IROH_LOG") or "").strip().upper()
+    if not level or not hasattr(iroh.LogLevel, level):
+        return
+    try:
+        iroh.set_log_level(getattr(iroh.LogLevel, level))
+        logger.debug("iroh: log level set to %s (stderr)", level)
+    except Exception:
+        logger.debug("iroh: set_log_level failed", exc_info=True)
+
+
 def _require_iroh():
     try:
         import iroh
@@ -87,6 +112,7 @@ def _require_iroh():
             "Session sharing needs the 'iroh' package (a core dependency). "
             "Reinstall hermes-agent, or: pip install iroh"
         ) from exc
+    _maybe_configure_iroh_logging(iroh)
     return iroh
 
 
