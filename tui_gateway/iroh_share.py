@@ -161,6 +161,8 @@ class _ClientTransport:
         return True
 
     def _enqueue(self, obj: dict) -> None:
+        if self._closed:
+            return  # a write scheduled just before close must not enqueue
         if self._queue.qsize() >= _MAX_QUEUED:
             try:
                 self._queue.get_nowait()  # drop oldest; runs on the loop thread
@@ -295,10 +297,13 @@ class IrohShareHost:
         # the loop has no pending work (and no iroh continuation fires) when it
         # closes.
         current = asyncio.current_task()
-        for task in asyncio.all_tasks(self._loop):
-            if task is not current:
-                task.cancel()
-        await asyncio.sleep(0)
+        pending = [t for t in asyncio.all_tasks(self._loop) if t is not current]
+        for task in pending:
+            task.cancel()
+        if pending:
+            # Await the cancellations so each task runs its finally/cleanup (and
+            # any iroh continuation settles) before the loop closes.
+            await asyncio.gather(*pending, return_exceptions=True)
         self._loop.stop()
 
     # -- accept + per-connection ------------------------------------------
@@ -538,6 +543,16 @@ def start_join_bridge(ticket: str, name: str = "guest") -> tuple[int, Optional[s
         try:
             loop.run_forever()
         finally:
+            # Drain cancelled iroh/WS tasks so their continuations settle before
+            # the loop closes (avoids "Event loop is closed" at teardown).
+            try:
+                pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
             loop.close()
 
     threading.Thread(target=_run, name="hermes-join-bridge", daemon=True).start()
