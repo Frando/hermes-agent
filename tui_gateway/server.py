@@ -655,6 +655,51 @@ def _transport_is_dead(transport) -> bool:
     return getattr(transport, "_closed", None) is True
 
 
+def enable_sharing_fanout() -> "FanoutTransport":
+    """Upgrade the process stdio transport to a fan-out so sessions can be shared.
+
+    Idempotent. After this, every session created on the stdio path holds the
+    fan-out as its transport slot, so additional clients can attach without
+    stealing the host's event stream. Called once when the gateway starts in
+    share mode; a no-op (and never reached) for an unshared gateway.
+    """
+    global _stdio_transport
+    if not isinstance(_stdio_transport, FanoutTransport):
+        _stdio_transport = FanoutTransport(_stdio_transport)
+    return _stdio_transport
+
+
+def attach_shared_transport(transport: Transport) -> None:
+    """Add a client transport to the shared fan-out (no-op if not sharing)."""
+    if isinstance(_stdio_transport, FanoutTransport):
+        _stdio_transport.add(transport)
+
+
+def detach_shared_transport(transport: Transport) -> None:
+    """Remove a client transport from the shared fan-out (no-op if not sharing)."""
+    if isinstance(_stdio_transport, FanoutTransport):
+        _stdio_transport.remove(transport)
+
+
+def active_shared_session_id() -> Optional[str]:
+    """Return the most recently active live session id, or None.
+
+    A joiner attaches to this session (the acceptor hands it back in the
+    welcome so the remote TUI resumes the host's session rather than creating
+    its own).
+    """
+    with _sessions_lock:
+        best_sid: Optional[str] = None
+        best_at = -1.0
+        for sid, session in _sessions.items():
+            if session.get("_finalized"):
+                continue
+            active_at = float(session.get("last_active") or session.get("created_at") or 0.0)
+            if active_at >= best_at:
+                best_sid, best_at = sid, active_at
+        return best_sid
+
+
 def _bind_session_transport(session: dict, transport: Optional[Transport]) -> None:
     """Point a session at ``transport``, preserving any active fan-out.
 
