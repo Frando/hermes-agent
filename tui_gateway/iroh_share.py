@@ -20,6 +20,7 @@ on ``tui_gateway.server``; iroh is optional, so a gateway without it still runs.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import secrets
@@ -99,14 +100,30 @@ def _split_ticket(shared: str) -> tuple[str, str]:
     return base, token
 
 
+def _encode_id(endpoint_id) -> str:
+    """Encode an EndpointId as lowercase base32 with no padding (52 chars).
+
+    Shorter than the 64-char hex string and the iroh FFI exposes no base32
+    encoder, so encode the raw 32 bytes here.
+    """
+    return base64.b32encode(endpoint_id.to_bytes()).decode("ascii").rstrip("=").lower()
+
+
+def _decode_id(iroh, encoded: str):
+    """Inverse of :func:`_encode_id`: base32 string -> EndpointId."""
+    padded = encoded.strip().upper()
+    padded += "=" * (-len(padded) % 8)
+    return iroh.EndpointId.from_bytes(base64.b32decode(padded))
+
+
 def _connect_addr(iroh, endpoint_id: str):
-    """Build the iroh address to dial from a ticket's endpoint id.
+    """Build the iroh address to dial from a ticket's base32 endpoint id.
 
     Only the endpoint id is carried in a ticket; its actual addresses are
     resolved by iroh discovery at connect time. Tests monkeypatch this to return
     a known direct address so they can connect over loopback without discovery.
     """
-    return iroh.EndpointAddr(iroh.EndpointId.from_string(endpoint_id), None, [])
+    return iroh.EndpointAddr(_decode_id(iroh, endpoint_id), None, [])
 
 
 class _LineReader:
@@ -301,7 +318,7 @@ class IrohShareHost:
             await asyncio.wait_for(self._endpoint.online(), timeout=online_timeout)
         except Exception:
             pass
-        base = str(self._endpoint.id())
+        base = _encode_id(self._endpoint.id())
         self._tickets = (
             f"{base}{_TICKET_SEP}{self._watch_token}",
             f"{base}{_TICKET_SEP}{self._control_token}",
