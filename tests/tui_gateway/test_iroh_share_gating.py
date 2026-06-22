@@ -53,10 +53,15 @@ def test_is_grab():
 def test_watch_role_blocked_from_mutating():
     h = _host()
     watcher = _client(sh.ROLE_WATCH)
-    assert h._authorized(watcher, "config.get") is True       # read-only allowed
-    assert h._authorized(watcher, "session.resume") is True   # attach allowed
-    assert h._authorized(watcher, "prompt.submit") is False   # mutating denied
+    assert h._authorized(watcher, "commands.catalog") is True  # read-only allowed
+    assert h._authorized(watcher, "session.resume") is True    # attach allowed
+    assert h._authorized(watcher, "prompt.submit") is False    # mutating denied
     assert h._authorized(watcher, "slash.exec") is False
+    # Secret-leaking / agent-running / cross-session methods are NOT read-only.
+    assert h._authorized(watcher, "config.get") is False
+    assert h._authorized(watcher, "preview.restart") is False
+    assert h._authorized(watcher, "spawn_tree.list") is False
+    assert h._authorized(watcher, "complete.path") is False
 
 
 def test_session_enumeration_denied_for_watchers():
@@ -82,7 +87,7 @@ def test_control_requires_holding_grab():
     h = _host()
     controller = _client(sh.ROLE_CONTROL, cid="c1")
     # Read-only always allowed.
-    assert h._authorized(controller, "config.get") is True
+    assert h._authorized(controller, "commands.catalog") is True
     # Mutating denied until this client holds control.
     assert h._authorized(controller, "prompt.submit") is False
     h._grab(controller)

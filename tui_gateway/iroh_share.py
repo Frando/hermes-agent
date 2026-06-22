@@ -38,25 +38,32 @@ _MAX_CLIENTS = 32
 _HELLO_TIMEOUT = 10.0
 _ONLINE_TIMEOUT = 8.0
 _MAX_QUEUED = 2000
+# Join bridge: cap host frames buffered before the local TUI connects, and tear
+# the bridge down if the TUI never connects, so a failed launch cannot leak an
+# unbounded buffer or a phantom joiner on the host.
+_MAX_BRIDGE_BUFFER = 2000
+_BRIDGE_CONNECT_TIMEOUT = 60.0
 
 ROLE_WATCH = "watch"
 ROLE_CONTROL = "control"
 
-# Methods a watch joiner may call: observation and attachment only. Everything
-# not in this set (including any method added later) is treated as mutating, so
-# it is denied to watchers and gated behind control for controllers. Failing
-# closed is deliberate: a new mutating method must never silently become
-# reachable by a watch ticket.
+# Methods a watch joiner may call. Deliberately tiny and audited: each entry is
+# read-only AND scoped to the joiner's pinned session (or carries no session
+# state at all). Everything else (including any method added later) is treated
+# as mutating, so it is denied to watchers and gated behind control for
+# controllers. Failing closed is the point. In particular this set must NOT
+# include methods that take a non-session_id locator (so session pinning cannot
+# apply), return secrets, run an agent, or read across sessions: e.g.
+# preview.restart (spawns an agent), config.get/config.show (api keys),
+# spawn_tree.list/load (cross-session, keyed by path), complete.path (filesystem).
 _READ_ONLY_METHODS = frozenset({
-    "agents.list", "billing.state", "billing.charge_status", "commands.catalog",
-    "command.resolve", "complete.path", "complete.slash", "config.get",
-    "config.show", "credits.view", "delegation.status", "handoff.state",
-    "insights.get", "model.options", "plugins.list", "process.list",
-    "rollback.list", "rollback.diff", "session.history",
-    "session.status", "session.usage",
-    "session.resume", "setup.status", "setup.runtime_check", "spawn_tree.list",
-    "spawn_tree.load", "toolsets.list", "tools.list", "tools.show",
-    "paste.collapse", "input.detect_drop", "preview.restart",
+    "commands.catalog",   # static slash-command catalog
+    "command.resolve",    # resolve a command name
+    "complete.slash",     # slash-command completion (no filesystem)
+    "session.resume",     # attach to the pinned session (pinned-checked)
+    "session.history",    # transcript of the pinned session (pinned-checked)
+    "session.status",     # status of the pinned session (pinned-checked)
+    "session.usage",      # token usage of the pinned session (pinned-checked)
 })
 
 
@@ -143,16 +150,23 @@ class _ClientTransport:
             return False
         if not self._allowed(obj):
             return True  # filtered, but the connection is healthy
-        if self._queue.qsize() >= _MAX_QUEUED:
-            try:
-                self._loop.call_soon_threadsafe(self._queue.get_nowait)
-            except Exception:
-                pass
         try:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, obj)
+            # Do the bound-check, drop, and enqueue together on the loop thread.
+            # asyncio.Queue is not safe to size/drain from another thread, so
+            # write() (called from gateway worker threads) must not touch it
+            # directly.
+            self._loop.call_soon_threadsafe(self._enqueue, obj)
         except RuntimeError:
             return False
         return True
+
+    def _enqueue(self, obj: dict) -> None:
+        if self._queue.qsize() >= _MAX_QUEUED:
+            try:
+                self._queue.get_nowait()  # drop oldest; runs on the loop thread
+            except asyncio.QueueEmpty:
+                pass
+        self._queue.put_nowait(obj)
 
     def _allowed(self, obj: dict) -> bool:
         return _frame_for_sid(obj, self._attached_sid)
@@ -271,11 +285,20 @@ class IrohShareHost:
         self._loop.create_task(self._shutdown_and_stop())
 
     async def _shutdown_and_stop(self) -> None:
+        self._closing = True
         try:
             if self._endpoint is not None:
                 await self._endpoint.close()
         except Exception:
             pass
+        # Cancel the accept loop, per-connection handlers, and writer tasks so
+        # the loop has no pending work (and no iroh continuation fires) when it
+        # closes.
+        current = asyncio.current_task()
+        for task in asyncio.all_tasks(self._loop):
+            if task is not current:
+                task.cancel()
+        await asyncio.sleep(0)
         self._loop.stop()
 
     # -- accept + per-connection ------------------------------------------
@@ -325,21 +348,32 @@ class IrohShareHost:
             name = _sanitize((hello.get("name") or "guest")).strip()[:40] or "guest"
 
             sid = server.active_shared_session_id()
+            if not sid:
+                # No live session to attach to. Refuse rather than create a
+                # client with no pinned session, which would defeat the
+                # per-session frame filter.
+                await self._raw_write(send, {
+                    "type": "error", "message": "host has no shareable session yet",
+                })
+                return
+
             transport = _ClientTransport(send, self._loop, sid)
             client = _Client(secrets.token_hex(4), name, role, transport, pinned_sid=sid)
-            self._clients[client.cid] = client
-            server.attach_shared_transport(transport)
 
-            # Welcome carries the session id so the remote TUI resumes the
-            # host's live session instead of creating its own.
+            # Send the welcome and gateway.ready FIRST, then attach to the
+            # fan-out. Attaching last guarantees the joiner cannot receive a
+            # session event ahead of gateway.ready. The welcome carries the
+            # session id so the remote TUI resumes the host's session.
             await self._raw_write(send, {
                 "type": "welcome", "role": role, "session_id": sid,
                 "controller": self._controller_name(),
             })
-            transport.write({
+            await self._raw_write(send, {
                 "jsonrpc": "2.0", "method": "event",
                 "params": {"type": "gateway.ready", "payload": {"skin": server.resolve_skin()}},
             })
+            self._clients[client.cid] = client
+            server.attach_shared_transport(transport)
             self._notice(f"{name} joined ({role})")
             await self._read_loop(client, reader)
         finally:
@@ -368,9 +402,9 @@ class IrohShareHost:
             rid = req.get("id")
 
             if self._is_grab(method, req.get("params")):
-                self._grab(client)
+                ok = self._grab(client)
                 if rid is not None:
-                    client.transport.write({"jsonrpc": "2.0", "id": rid, "result": {"ok": True}})
+                    client.transport.write({"jsonrpc": "2.0", "id": rid, "result": {"ok": ok}})
                 continue
 
             # Pin the joiner to the shared session: a request naming any other
@@ -437,12 +471,13 @@ class IrohShareHost:
             return "watch-only: this ticket cannot control the session"
         return "not in control: type /grab to take control"
 
-    def _grab(self, client: _Client) -> None:
+    def _grab(self, client: _Client) -> bool:
         if client.role != ROLE_CONTROL:
             self._notice("watch-only ticket cannot take control", only=client)
-            return
+            return False
         self._controller_cid = client.cid
         self._notice(f"control held by {client.name}")
+        return True
 
     def _controller_name(self) -> str:
         c = self._clients.get(self._controller_cid or "")
@@ -577,8 +612,17 @@ async def _bridge_setup(iroh, base, token, name, result, loop) -> None:
                 except Exception:
                     pass
             state["buffer"].append(line)
+            if len(state["buffer"]) > _MAX_BRIDGE_BUFFER:
+                state["buffer"].pop(0)  # drop oldest if the TUI is slow to attach
+
+    async def _connect_deadline() -> None:
+        await asyncio.sleep(_BRIDGE_CONNECT_TIMEOUT)
+        if state["ws"] is None:
+            logger.debug("join bridge: TUI never connected; tearing down")
+            loop.stop()
 
     loop.create_task(_pump())
+    loop.create_task(_connect_deadline())
 
 
 def _sanitize(text: str) -> str:

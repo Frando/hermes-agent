@@ -54,7 +54,7 @@ def test_join_bridge_end_to_end(monkeypatch):
         assert joined_sid == sid
         frames = asyncio.run(_ws_client(
             port,
-            [{"jsonrpc": "2.0", "id": 10, "method": "config.get", "params": {}}],
+            [{"jsonrpc": "2.0", "id": 10, "method": "commands.catalog", "params": {}}],
         ))
     finally:
         host.stop()
@@ -67,6 +67,6 @@ def test_join_bridge_end_to_end(monkeypatch):
 
     # The read-only request round-tripped the full chain and came back.
     assert any(f.get("id") == 10 for f in frames), (
-        f"no config.get response through the bridge; "
+        f"no commands.catalog response through the bridge; "
         f"frames={[f.get('id') or f.get('params', {}).get('type') for f in frames]}"
     )

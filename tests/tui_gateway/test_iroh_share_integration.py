@@ -71,7 +71,7 @@ def test_iroh_joiner_attaches_and_receives_fanout(monkeypatch):
     try:
         frames = asyncio.run(_raw_client(
             control,
-            [{"jsonrpc": "2.0", "id": 10, "method": "config.get", "params": {}}],
+            [{"jsonrpc": "2.0", "id": 10, "method": "commands.catalog", "params": {}}],
         ))
     finally:
         host.stop()
@@ -83,7 +83,7 @@ def test_iroh_joiner_attaches_and_receives_fanout(monkeypatch):
 
     # The read-only request got a response back over iroh.
     resp = next((f for f in frames if f.get("id") == 10), None)
-    assert resp is not None, f"no response to config.get; frames={[f.get('type') or f.get('id') for f in frames]}"
+    assert resp is not None, f"no response to commands.catalog; frames={[f.get('type') or f.get('id') for f in frames]}"
 
     # The session event fanned out to the joiner.
     fanned = next(

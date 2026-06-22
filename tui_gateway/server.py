@@ -716,7 +716,11 @@ def _bind_session_transport(session: dict, transport: Optional[Transport]) -> No
         return
     current = session.get("transport")
     if isinstance(current, FanoutTransport):
-        current.add(transport)
+        # The host's own rebind passes the fan-out itself (it is both the
+        # current_transport and the slot); adding it to its own members would
+        # recurse on write. Only genuine extra clients are added.
+        if transport is not current:
+            current.add(transport)
     else:
         session["transport"] = transport
 

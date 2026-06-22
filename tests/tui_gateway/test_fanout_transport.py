@@ -118,6 +118,28 @@ def test_bind_helper_adds_for_shared_session():
     assert joiner.frames == [{"n": 1}]  # joiner attached as an extra
 
 
+def test_fanout_add_rejects_self():
+    # Adding the fan-out to itself must not happen (would recurse on write).
+    primary = _RecordingTransport()
+    fan = FanoutTransport(primary)
+    fan.add(fan)
+    fan.write({"n": 1})
+    assert primary.frames == [{"n": 1}]  # delivered exactly once, no recursion
+
+
+def test_bind_helper_self_bind_is_noop():
+    # The host path binds the fan-out itself (current_transport() == the slot).
+    from tui_gateway.server import _bind_session_transport
+
+    primary = _RecordingTransport()
+    fan = FanoutTransport(primary)
+    session = {"transport": fan}
+    _bind_session_transport(session, fan)  # must not add fan to its own members
+    assert session["transport"] is fan
+    fan.write({"n": 1})
+    assert primary.frames == [{"n": 1}]  # exactly once
+
+
 def test_bind_helper_ignores_none():
     from tui_gateway.server import _bind_session_transport
 

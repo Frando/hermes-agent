@@ -248,8 +248,8 @@ class FanoutTransport:
         return self._primary
 
     def add(self, transport: "Transport") -> None:
-        """Attach an extra member. Adding the primary or a duplicate is a no-op."""
-        if transport is self._primary:
+        """Attach an extra member. Adding the primary, self, or a duplicate is a no-op."""
+        if transport is self._primary or transport is self:
             return
         with self._lock:
             if transport not in self._extras:
