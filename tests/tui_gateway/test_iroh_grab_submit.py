@@ -39,7 +39,8 @@ async def _client(ticket, requests, *, grab=False):
     async def write(obj):
         await send.write_all((json.dumps(obj) + "\n").encode("utf-8"))
 
-    await write({"type": "hello", "token": token, "name": "ctl"})
+    await write({"jsonrpc": "2.0", "id": 0, "method": "hello",
+                 "params": {"token": token, "name": "ctl"}})
     await asyncio.sleep(0.4)
     if grab:
         await write({"jsonrpc": "2.0", "id": 5, "method": "slash.exec", "params": {"command": "grab"}})

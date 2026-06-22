@@ -32,7 +32,7 @@ from tui_gateway import server
 
 logger = logging.getLogger(__name__)
 
-ALPN = b"hermes/tui-share/1"
+ALPN = b"hermes-share/0"
 # A ticket is "<endpoint-id>/<token>": the 64-hex endpoint id (resolved to
 # addresses by iroh discovery, so no addresses are embedded) and a role token.
 # Neither part contains a slash, so the last slash separates them.
@@ -140,6 +140,11 @@ def _decode_id(iroh, encoded: str):
     padded = encoded.strip().upper()
     padded += "=" * (-len(padded) % 8)
     return iroh.EndpointId.from_bytes(base64.b32decode(padded))
+
+
+def _rpc_error(rid, code: int, message: str) -> dict:
+    """A JSON-RPC error response frame."""
+    return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
 
 
 def _connect_addr(iroh, endpoint_id: str):
@@ -544,19 +549,25 @@ class IrohShareHost:
                 hello = await asyncio.wait_for(reader.next(), timeout=_HELLO_TIMEOUT)
             except Exception:
                 return
-            if not hello or hello.get("type") != "hello":
-                await self._raw_write(send, {"type": "error", "message": "expected hello"})
+            # The handshake is a JSON-RPC exchange: the joiner sends a `hello`
+            # request, the host replies with the welcome as its result (or an
+            # error). After that the stream is ordinary JSON-RPC.
+            if not isinstance(hello, dict) or hello.get("method") != "hello":
+                rid = hello.get("id") if isinstance(hello, dict) else None
+                await self._raw_write(send, _rpc_error(rid, -32600, "expected hello"))
                 return
-            shared, role = self._lookup_token(hello.get("token") or "")
+            rid = hello.get("id")
+            params = hello.get("params") if isinstance(hello.get("params"), dict) else {}
+            shared, role = self._lookup_token(params.get("token") or "")
             if shared is None:
                 # The token matches no shared session: either the ticket is
                 # wrong or the host has stopped sharing that session.
-                await self._raw_write(send, {"type": "error", "message": "invalid ticket"})
+                await self._raw_write(send, _rpc_error(rid, 4030, "invalid ticket"))
                 return
             if len(self._clients) >= _MAX_CLIENTS:
-                await self._raw_write(send, {"type": "error", "message": "session full"})
+                await self._raw_write(send, _rpc_error(rid, 4290, "session full"))
                 return
-            name = _sanitize((hello.get("name") or "guest")).strip()[:40] or "guest"
+            name = _sanitize((params.get("name") or "guest")).strip()[:40] or "guest"
 
             # The token determines the session: events and prompt.submit use the
             # ephemeral id (so the event filter and submit pin track it); the
@@ -565,15 +576,18 @@ class IrohShareHost:
             client = _Client(secrets.token_hex(4), name, role, transport, shared)
             client.conn = conn
 
-            # Send the welcome and gateway.ready FIRST, then attach to the
-            # fan-out. Attaching last guarantees the joiner cannot receive a
-            # session event ahead of gateway.ready. The welcome carries the
-            # RESUME KEY so the remote TUI's session.resume reattaches to this
+            # Send the welcome (the hello response) and gateway.ready FIRST, then
+            # attach to the fan-out. Attaching last guarantees the joiner cannot
+            # receive a session event ahead of gateway.ready. The welcome carries
+            # the RESUME KEY so the remote TUI's session.resume reattaches to this
             # exact live session (resume is keyed by the persistent key, not the
             # ephemeral id) and gets the ephemeral id back to drive it with.
             await self._raw_write(send, {
-                "type": "welcome", "role": role, "session_id": shared.key,
-                "controller": self._holder_name(shared),
+                "jsonrpc": "2.0", "id": rid,
+                "result": {
+                    "role": role, "session_id": shared.key,
+                    "controller": self._holder_name(shared),
+                },
             })
             await self._raw_write(send, {
                 "jsonrpc": "2.0", "method": "event",
@@ -852,13 +866,17 @@ async def _bridge_setup(iroh, base, token, name, result, loop) -> None:
     recv, send = bi.recv(), bi.send()
     reader = _LineReader(recv)
 
-    await send.write_all(
-        (json.dumps({"type": "hello", "token": token, "name": name}) + "\n").encode("utf-8")
-    )
+    # JSON-RPC handshake: send a `hello` request, read the welcome as its result.
+    hello = {"jsonrpc": "2.0", "id": 0, "method": "hello",
+             "params": {"token": token, "name": name}}
+    await send.write_all((json.dumps(hello) + "\n").encode("utf-8"))
     welcome = await reader.next()
-    if not welcome or welcome.get("type") == "error":
-        raise JoinError((welcome or {}).get("message", "host refused the connection"))
-    result["session_id"] = welcome.get("session_id")
+    if not isinstance(welcome, dict) or "error" in welcome:
+        message = "host refused the connection"
+        if isinstance(welcome, dict):
+            message = (welcome.get("error") or {}).get("message", message)
+        raise JoinError(message)
+    result["session_id"] = (welcome.get("result") or {}).get("session_id")
 
     state: dict = {"ws": None, "buffer": []}
 

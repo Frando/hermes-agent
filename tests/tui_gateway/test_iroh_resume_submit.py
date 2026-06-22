@@ -39,10 +39,11 @@ async def _run(control):
     async def write(o):
         await send.write_all((json.dumps(o) + "\n").encode("utf-8"))
 
-    await write({"type": "hello", "token": token, "name": "joiner"})
+    await write({"jsonrpc": "2.0", "id": 0, "method": "hello",
+                 "params": {"token": token, "name": "joiner"}})
     await asyncio.sleep(0.4)
-    welcome = next((f for f in frames if f.get("type") == "welcome"), None)
-    wsid = welcome["session_id"]
+    welcome = next((f for f in frames if f.get("id") == 0 and "result" in f), None)
+    wsid = welcome["result"]["session_id"]
 
     # Resume like the real TUI (HERMES_TUI_RESUME = welcome session id).
     await write({"jsonrpc": "2.0", "id": 8, "method": "session.resume",

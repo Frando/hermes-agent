@@ -40,7 +40,8 @@ async def _raw_client(ticket, requests):
     async def write(obj):
         await send.write_all((json.dumps(obj) + "\n").encode("utf-8"))
 
-    await write({"type": "hello", "token": token, "name": "tester"})
+    await write({"jsonrpc": "2.0", "id": 0, "method": "hello",
+                 "params": {"token": token, "name": "tester"}})
     await asyncio.sleep(0.4)
     for req in requests:
         await write(req)
@@ -82,12 +83,14 @@ def test_iroh_joiner_attaches_and_receives_fanout(monkeypatch):
     finally:
         host.stop()
 
-    welcome = next((f for f in frames if f.get("type") == "welcome"), None)
+    # The welcome is the JSON-RPC response to the hello request (id 0).
+    welcome = next((f for f in frames if f.get("id") == 0 and "result" in f), None)
     assert welcome is not None
-    assert welcome["role"] == sh.ROLE_CONTROL
+    result = welcome["result"]
+    assert result["role"] == sh.ROLE_CONTROL
     # The welcome carries the resume key (the persistent session key), not the
     # ephemeral id; the event fan-out below is keyed by the ephemeral id.
-    assert welcome["session_id"] == server._sessions[sid]["session_key"]
+    assert result["session_id"] == server._sessions[sid]["session_key"]
 
     # The read-only request got a response back over iroh.
     resp = next((f for f in frames if f.get("id") == 10), None)
