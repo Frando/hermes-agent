@@ -16,7 +16,7 @@ def _host():
 
 
 def _client(role, cid="c1", name="x"):
-    return sh._Client(cid, name, role, transport=None, pinned_sid="s1")
+    return sh._Client(cid, name, role, transport=None, pinned_sid="s1", pinned_key="k1")
 
 
 def test_split_ticket():

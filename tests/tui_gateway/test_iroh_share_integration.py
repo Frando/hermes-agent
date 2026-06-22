@@ -82,7 +82,9 @@ def test_iroh_joiner_attaches_and_receives_fanout(monkeypatch):
     welcome = next((f for f in frames if f.get("type") == "welcome"), None)
     assert welcome is not None
     assert welcome["role"] == sh.ROLE_CONTROL
-    assert welcome["session_id"] == sid
+    # The welcome carries the resume key (the persistent session key), not the
+    # ephemeral id; the event fan-out below is keyed by the ephemeral id.
+    assert welcome["session_id"] == server._sessions[sid]["session_key"]
 
     # The read-only request got a response back over iroh.
     resp = next((f for f in frames if f.get("id") == 10), None)

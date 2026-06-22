@@ -54,7 +54,8 @@ def test_join_bridge_end_to_end(monkeypatch):
     _watch, control = host.start(online_timeout=2)
     try:
         port, joined_sid = sh.start_join_bridge(control, name="bridge-test")
-        assert joined_sid == sid
+        # The bridge surfaces the resume key (what HERMES_TUI_RESUME needs).
+        assert joined_sid == server._sessions[sid]["session_key"]
         frames = asyncio.run(_ws_client(
             port,
             [{"jsonrpc": "2.0", "id": 10, "method": "commands.catalog", "params": {}}],

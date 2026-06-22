@@ -704,6 +704,32 @@ def active_shared_session_id() -> Optional[str]:
         return best_sid
 
 
+def shared_session_handle() -> Optional[tuple[str, str]]:
+    """Return ``(ephemeral_id, resume_key)`` for the session a joiner should share.
+
+    ``ephemeral_id`` is the ``_sessions`` key used by prompt.submit and carried
+    on events; ``resume_key`` is the persistent session key (the DB id) a joiner
+    passes to ``session.resume`` to reattach to this exact live session. A DB row
+    is ensured so the resume's ``db.get_session`` lookup succeeds even before the
+    host has sent a prompt. Returns None when there is no live session to share.
+    """
+    sid = active_shared_session_id()
+    if not sid:
+        return None
+    with _sessions_lock:
+        session = _sessions.get(sid)
+    if not session:
+        return None
+    try:
+        _ensure_session_db_row(session)
+    except Exception:
+        logger.debug("share: could not ensure session db row", exc_info=True)
+    key = str(session.get("session_key") or "")
+    if not key:
+        return None
+    return sid, key
+
+
 def _bind_session_transport(session: dict, transport: Optional[Transport]) -> None:
     """Point a session at ``transport``, preserving any active fan-out.
 

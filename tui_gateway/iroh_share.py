@@ -195,15 +195,19 @@ class _ClientTransport:
 
 
 class _Client:
-    __slots__ = ("cid", "name", "role", "transport", "pinned_sid")
+    __slots__ = ("cid", "name", "role", "transport", "pinned_sid", "pinned_key")
 
     def __init__(self, cid: str, name: str, role: str, transport: _ClientTransport,
-                 pinned_sid: Optional[str]):
+                 pinned_sid: Optional[str], pinned_key: Optional[str]):
         self.cid = cid
         self.name = name
         self.role = role
         self.transport = transport
+        # The joiner addresses the shared session two ways: the ephemeral id on
+        # events and prompt.submit, and the resume key on session.resume. Both
+        # are allowed; anything else is a different session and refused.
         self.pinned_sid = pinned_sid
+        self.pinned_key = pinned_key
 
 
 class IrohShareHost:
@@ -357,8 +361,8 @@ class IrohShareHost:
                 return
             name = _sanitize((hello.get("name") or "guest")).strip()[:40] or "guest"
 
-            sid = server.active_shared_session_id()
-            if not sid:
+            handle = server.shared_session_handle()
+            if handle is None:
                 # No live session to attach to. Refuse rather than create a
                 # client with no pinned session, which would defeat the
                 # per-session frame filter.
@@ -366,16 +370,24 @@ class IrohShareHost:
                     "type": "error", "message": "host has no shareable session yet",
                 })
                 return
+            sid, resume_key = handle
 
+            # Events and prompt.submit use the ephemeral id, so the event filter
+            # and submit pin track it; the joiner resumes by the resume key.
             transport = _ClientTransport(send, self._loop, sid)
-            client = _Client(secrets.token_hex(4), name, role, transport, pinned_sid=sid)
+            client = _Client(
+                secrets.token_hex(4), name, role, transport,
+                pinned_sid=sid, pinned_key=resume_key,
+            )
 
             # Send the welcome and gateway.ready FIRST, then attach to the
             # fan-out. Attaching last guarantees the joiner cannot receive a
             # session event ahead of gateway.ready. The welcome carries the
-            # session id so the remote TUI resumes the host's session.
+            # RESUME KEY so the remote TUI's session.resume reattaches to this
+            # exact live session (resume is keyed by the persistent key, not the
+            # ephemeral id) and gets the ephemeral id back to drive it with.
             await self._raw_write(send, {
-                "type": "welcome", "role": role, "session_id": sid,
+                "type": "welcome", "role": role, "session_id": resume_key,
                 "controller": self._controller_name(),
             })
             await self._raw_write(send, {
@@ -430,10 +442,11 @@ class IrohShareHost:
 
             # Pin the joiner to the shared session: a request naming any other
             # session is refused, so a joiner cannot read or drive the host's
-            # other sessions by guessing an id.
+            # other sessions by guessing an id. The shared session is addressable
+            # by its ephemeral id (events/submit) or its resume key (resume).
             params = req.get("params")
             req_sid = params.get("session_id") if isinstance(params, dict) else None
-            if req_sid and req_sid != client.pinned_sid:
+            if req_sid and req_sid != client.pinned_sid and req_sid != client.pinned_key:
                 if rid is not None:
                     client.transport.write({
                         "jsonrpc": "2.0", "id": rid,
