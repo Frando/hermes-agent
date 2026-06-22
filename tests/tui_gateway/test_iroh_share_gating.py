@@ -16,7 +16,7 @@ def _host():
 
 
 def _client(role, cid="c1", name="x"):
-    return sh._Client(cid, name, role, transport=None)
+    return sh._Client(cid, name, role, transport=None, pinned_sid="s1")
 
 
 def test_split_ticket():
@@ -57,6 +57,15 @@ def test_watch_role_blocked_from_mutating():
     assert h._authorized(watcher, "session.resume") is True   # attach allowed
     assert h._authorized(watcher, "prompt.submit") is False   # mutating denied
     assert h._authorized(watcher, "slash.exec") is False
+
+
+def test_session_enumeration_denied_for_watchers():
+    # A joiner must not be able to enumerate the host's other sessions.
+    h = _host()
+    watcher = _client(sh.ROLE_WATCH)
+    assert h._authorized(watcher, "session.list") is False
+    assert h._authorized(watcher, "session.active_list") is False
+    assert h._authorized(watcher, "session.most_recent") is False
 
 
 def test_unknown_method_is_treated_as_mutating():

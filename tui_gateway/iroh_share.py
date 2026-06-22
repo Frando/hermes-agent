@@ -52,8 +52,8 @@ _READ_ONLY_METHODS = frozenset({
     "command.resolve", "complete.path", "complete.slash", "config.get",
     "config.show", "credits.view", "delegation.status", "handoff.state",
     "insights.get", "model.options", "plugins.list", "process.list",
-    "rollback.list", "rollback.diff", "session.active_list", "session.history",
-    "session.list", "session.most_recent", "session.status", "session.usage",
+    "rollback.list", "rollback.diff", "session.history",
+    "session.status", "session.usage",
     "session.resume", "setup.status", "setup.runtime_check", "spawn_tree.list",
     "spawn_tree.load", "toolsets.list", "tools.list", "tools.show",
     "paste.collapse", "input.detect_drop", "preview.restart",
@@ -179,13 +179,15 @@ class _ClientTransport:
 
 
 class _Client:
-    __slots__ = ("cid", "name", "role", "transport")
+    __slots__ = ("cid", "name", "role", "transport", "pinned_sid")
 
-    def __init__(self, cid: str, name: str, role: str, transport: _ClientTransport):
+    def __init__(self, cid: str, name: str, role: str, transport: _ClientTransport,
+                 pinned_sid: Optional[str]):
         self.cid = cid
         self.name = name
         self.role = role
         self.transport = transport
+        self.pinned_sid = pinned_sid
 
 
 class IrohShareHost:
@@ -324,7 +326,7 @@ class IrohShareHost:
 
             sid = server.active_shared_session_id()
             transport = _ClientTransport(send, self._loop, sid)
-            client = _Client(secrets.token_hex(4), name, role, transport)
+            client = _Client(secrets.token_hex(4), name, role, transport, pinned_sid=sid)
             self._clients[client.cid] = client
             server.attach_shared_transport(transport)
 
@@ -369,6 +371,19 @@ class IrohShareHost:
                 self._grab(client)
                 if rid is not None:
                     client.transport.write({"jsonrpc": "2.0", "id": rid, "result": {"ok": True}})
+                continue
+
+            # Pin the joiner to the shared session: a request naming any other
+            # session is refused, so a joiner cannot read or drive the host's
+            # other sessions by guessing an id.
+            params = req.get("params")
+            req_sid = params.get("session_id") if isinstance(params, dict) else None
+            if req_sid and req_sid != client.pinned_sid:
+                if rid is not None:
+                    client.transport.write({
+                        "jsonrpc": "2.0", "id": rid,
+                        "error": {"code": 4031, "message": "not the shared session"},
+                    })
                 continue
 
             if not self._authorized(client, method):
