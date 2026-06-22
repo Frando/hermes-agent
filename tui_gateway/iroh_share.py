@@ -218,7 +218,10 @@ class IrohShareHost:
         self._thread: Optional[threading.Thread] = None
         self._endpoint = None
         self._clients: dict[str, _Client] = {}
-        self._controller_cid: Optional[str] = None
+        # The single controller across ALL participants. None means the host
+        # (the local `hermes share` pane) holds control; a _Client means that
+        # joiner does. Only one party can drive the agent at a time.
+        self._controller: Optional[_Client] = None
         self._watch_token = ""
         self._control_token = ""
         self._tickets: Optional[tuple[str, str]] = None
@@ -401,8 +404,9 @@ class IrohShareHost:
         finally:
             if client is not None:
                 self._clients.pop(client.cid, None)
-                if self._controller_cid == client.cid:
-                    self._controller_cid = None
+                if self._controller is client:
+                    # The controller left; control returns to the host.
+                    self._set_controller(None)
                 self._notice(f"{client.name} left")
             if transport is not None:
                 server.detach_shared_transport(transport)
@@ -498,24 +502,60 @@ class IrohShareHost:
         if method in _READ_ONLY_METHODS:
             return True
         # Mutating: only the controlling client may drive the agent.
-        return client.role == ROLE_CONTROL and self._controller_cid == client.cid
+        return self._controller is client
 
     def _deny_reason(self, client: _Client, method: Optional[str]) -> str:
         if client.role != ROLE_CONTROL:
             return "watch-only: this ticket cannot control the session"
-        return "not in control: type /grab to take control"
+        return f"{self._controller_name()} has control. Type /grab to take it."
 
     def _grab(self, client: _Client) -> bool:
         if client.role != ROLE_CONTROL:
             self._notice("watch-only ticket cannot take control", only=client)
             return False
-        self._controller_cid = client.cid
-        self._notice(f"control held by {client.name}")
+        self._set_controller(client)
         return True
 
+    # -- public control API (consulted by the gateway's prompt.submit) --------
+
+    def grab_host(self) -> None:
+        """Return control to the host (the local ``hermes share`` pane)."""
+        self._set_controller(None)
+
+    def is_controller(self, transport) -> bool:
+        """Whether ``transport`` belongs to the current controller.
+
+        The host drives through the process stdio transport (the fan-out); a
+        joiner drives through its own client transport.
+        """
+        ctrl = self._controller
+        if ctrl is None:
+            return transport is server._stdio_transport
+        return transport is ctrl.transport
+
+    def control_denied(self, transport) -> Optional[str]:
+        """A refusal message if ``transport`` is not the controller, else None."""
+        if self.is_controller(transport):
+            return None
+        return f"{self._controller_name()} has control. Type /grab to take it."
+
+    def _set_controller(self, client: Optional[_Client]) -> None:
+        if self._controller is client:
+            return
+        self._controller = client
+        # Announce to everyone (host + joiners) so all panes agree on who drives.
+        holder = self._controller_name()
+        try:
+            server.write_json({"jsonrpc": "2.0", "method": "event", "params": {
+                "type": "notification.show",
+                "payload": {"text": f"[share] {holder} now has control.",
+                            "kind": "ttl", "ttl_ms": 6000, "level": "info"},
+            }})
+        except Exception:
+            pass
+
     def _controller_name(self) -> str:
-        c = self._clients.get(self._controller_cid or "")
-        return c.name if c else "host"
+        return self._controller.name if self._controller is not None else "host"
 
     def _notice(self, text: str, only: Optional[_Client] = None) -> None:
         # notification.show is the gateway's toast channel; no session_id so the

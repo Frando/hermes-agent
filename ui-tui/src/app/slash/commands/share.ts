@@ -29,5 +29,21 @@ export const shareCommands: SlashCommand[] = [
         )
         .catch(ctx.guardedErr)
     }
+  },
+  {
+    help: 'Take control of a shared session',
+    name: 'grab',
+    run: (_arg, ctx) => {
+      // Routes via command.dispatch: a joiner's grab is intercepted by the iroh
+      // acceptor; the host's reaches the gateway. Both reply with an exec line.
+      ctx.gateway
+        .rpc<{ output?: string }>('command.dispatch', { name: 'grab', session_id: ctx.sid })
+        .then(
+          ctx.guarded<{ output?: string }>(res => {
+            ctx.transcript.sys(res.output || 'grab: no response')
+          })
+        )
+        .catch(ctx.guardedErr)
+    }
   }
 ]

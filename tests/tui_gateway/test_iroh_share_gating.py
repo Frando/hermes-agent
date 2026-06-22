@@ -91,7 +91,7 @@ def test_control_requires_holding_grab():
     # Mutating denied until this client holds control.
     assert h._authorized(controller, "prompt.submit") is False
     h._grab(controller)
-    assert h._controller_cid == "c1"
+    assert h._controller is controller
     assert h._authorized(controller, "prompt.submit") is True
 
 
@@ -99,7 +99,7 @@ def test_grab_is_refused_for_watch():
     h = _host()
     watcher = _client(sh.ROLE_WATCH, cid="w1")
     h._grab(watcher)
-    assert h._controller_cid is None  # watch can never take control
+    assert h._controller is None  # watch can never take control; host keeps it
 
 
 def test_second_controller_steals_grab():
@@ -109,9 +109,41 @@ def test_second_controller_steals_grab():
     h._grab(a)
     assert h._authorized(a, "prompt.submit") is True
     h._grab(b)
-    assert h._controller_cid == "b"
+    assert h._controller is b
     assert h._authorized(a, "prompt.submit") is False  # a lost control
     assert h._authorized(b, "prompt.submit") is True
+
+
+def test_host_is_default_controller_and_can_grab_back():
+    # Central control includes the host: the stdio (fan-out) transport is the
+    # controller by default; a joiner grab transfers it; grab_host reclaims it.
+    from tui_gateway import server
+
+    h = _host()
+    a = _client(sh.ROLE_CONTROL, cid="a")
+
+    class _T:
+        def write(self, o):
+            return True
+
+    a.transport = _T()
+
+    # Default: host holds control (the stdio transport drives, joiners do not).
+    assert h.is_controller(server._stdio_transport) is True
+    assert h.control_denied(server._stdio_transport) is None
+    assert h.is_controller(a.transport) is False
+    assert "has control" in (h.control_denied(a.transport) or "")
+
+    # Joiner grabs: now the host's stdio transport is refused, the joiner drives.
+    h._grab(a)
+    assert h.is_controller(a.transport) is True
+    assert h.is_controller(server._stdio_transport) is False
+    assert "has control" in (h.control_denied(server._stdio_transport) or "")
+
+    # Host grabs back.
+    h.grab_host()
+    assert h.is_controller(server._stdio_transport) is True
+    assert h.is_controller(a.transport) is False
 
 
 def test_frame_filter_session_scoping():

@@ -6336,6 +6336,14 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    # When the session is shared, a single party holds control at a time. Gate
+    # every submitter (the host included, which drives through the stdio
+    # transport) on the shared controller so two panes cannot drive at once.
+    share = _iroh_share_host
+    if share is not None:
+        denied = share.control_denied(current_transport())
+        if denied:
+            return _err(rid, 4030, denied)
     # Re-bind to the current client transport for this request. This keeps
     # streaming events on the active websocket even if an earlier disconnect
     # or fallback moved the session transport to stdio. When the session is
@@ -9046,6 +9054,17 @@ def _(rid, params: dict) -> dict:
                 )
     except Exception:
         pass
+
+    # ── Share control ────────────────────────────────────────────────
+    # The host (local share pane) reaches command.dispatch directly; a joiner's
+    # /grab is intercepted earlier by the iroh acceptor. So this branch is the
+    # host taking control back.
+    if name == "grab":
+        share = _iroh_share_host
+        if share is None:
+            return _ok(rid, {"type": "exec", "output": "This session is not being shared."})
+        share.grab_host()
+        return _ok(rid, {"type": "exec", "output": "You now control this session. Type to drive the agent."})
 
     # ── Commands that queue messages onto _pending_input in the CLI ───
     # In the TUI the slash worker subprocess has no reader for that queue,

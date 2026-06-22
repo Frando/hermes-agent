@@ -39,6 +39,41 @@ def test_share_tickets_reports_current_tickets(monkeypatch):
     }
 
 
+def test_prompt_submit_gated_by_shared_controller(monkeypatch):
+    """The host (stdio submitter) is refused while a joiner holds control."""
+    from tui_gateway import iroh_share as sh
+
+    monkeypatch.setattr(server, "_stdio_transport", server._stdio_transport)
+    server.enable_sharing_fanout()
+    server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "session.create", "params": {}})
+    sid = server.active_shared_session_id()
+
+    class _T:
+        def write(self, obj):
+            return True
+
+    host = sh.IrohShareHost()
+    joiner = sh._Client("c", "alice", sh.ROLE_CONTROL, transport=_T(), pinned_sid=sid, pinned_key="k")
+    host._controller = joiner  # a joiner holds control
+    monkeypatch.setattr(server, "_iroh_share_host", host)
+
+    # The host submits through stdio (transport=None binds the fan-out). Refused.
+    denied = server.dispatch({
+        "jsonrpc": "2.0", "id": 2, "method": "prompt.submit",
+        "params": {"session_id": sid, "text": "host tries"},
+    })
+    assert denied.get("error", {}).get("code") == 4030
+    assert "has control" in denied["error"]["message"]
+
+    # Host grabs control back; now the submit is accepted (starts streaming).
+    host.grab_host()
+    ok = server.dispatch({
+        "jsonrpc": "2.0", "id": 3, "method": "prompt.submit",
+        "params": {"session_id": sid, "text": "host drives"},
+    })
+    assert ok.get("error", {}).get("code") != 4030
+
+
 def test_prompt_submit_echoes_user_turn_to_others(monkeypatch):
     # Record the global stdio transport so the fan-out swap is restored.
     monkeypatch.setattr(server, "_stdio_transport", server._stdio_transport)
