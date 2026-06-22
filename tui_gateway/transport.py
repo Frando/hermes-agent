@@ -273,6 +273,10 @@ class FanoutTransport:
                 if not member.write(obj):
                     dead.append(member)
             except Exception:
+                # A raised write (vs. a False return) is an unexpected member
+                # fault, not a clean disconnect: log before pruning so it isn't
+                # silently indistinguishable from a peer going away.
+                logger.warning("fanout: dropping member after write error", exc_info=True)
                 dead.append(member)
         if dead:
             with self._lock:
@@ -296,7 +300,7 @@ class FanoutTransport:
             try:
                 self._primary.write(obj)
             except Exception:
-                pass
+                logger.warning("fanout: primary write failed", exc_info=True)
         with self._lock:
             extras = list(self._extras)
         dead: list["Transport"] = []
@@ -307,6 +311,7 @@ class FanoutTransport:
                 if not member.write(obj):
                     dead.append(member)
             except Exception:
+                logger.warning("fanout: dropping member after write error", exc_info=True)
                 dead.append(member)
         if dead:
             with self._lock:

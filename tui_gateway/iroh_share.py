@@ -357,6 +357,7 @@ class IrohShareHost:
             except Exception:
                 if self._closing:
                     break
+                logger.debug("share: accept_next failed, retrying", exc_info=True)
                 await asyncio.sleep(0.05)
                 continue
             if incoming is None:
@@ -374,6 +375,7 @@ class IrohShareHost:
             conn = await (await incoming.accept()).connect()
             bi = await conn.accept_bi()
         except Exception:
+            logger.debug("share: connection handshake failed", exc_info=True)
             return
         recv, send = bi.recv(), bi.send()
         reader = _LineReader(recv)

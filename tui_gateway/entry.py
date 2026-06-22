@@ -64,9 +64,26 @@ def _install_iroh_share() -> None:
     try:
         server.enable_sharing_fanout()
     except Exception:
+        logger.warning(
+            "iroh share: failed to enable session fan-out; sharing disabled",
+            exc_info=True,
+        )
         return
 
+    import atexit
     import threading as _share_threading
+
+    def _stop_share_host() -> None:
+        # Close the iroh endpoint on a clean exit so the relay drops our
+        # mapping and in-flight joiners are torn down rather than abandoned.
+        host = getattr(server, "_iroh_share_host", None)
+        if host is not None:
+            try:
+                host.stop()
+            except Exception:
+                logger.debug("iroh share: stop failed", exc_info=True)
+
+    atexit.register(_stop_share_host)
 
     def _boot() -> None:
         try:
@@ -87,14 +104,19 @@ def _install_iroh_share() -> None:
             return
         # Emit share.info so the TUI prints the tickets in the transcript on
         # startup, exactly as if /share had been typed (rather than a transient
-        # toast). Only the host's own client is attached at boot, so the control
-        # ticket is not exposed to joiners.
+        # toast). Write it to the HOST's own stdout transport (the fan-out's
+        # primary), NEVER through the fan-out: the message carries the secret
+        # control ticket, and broadcasting it would hand control to any attached
+        # joiner (a watch joiner could escalate). Routing to the primary makes
+        # that impossible regardless of who is attached when this fires.
         text = (
             "Sharing this session over iroh.\n"
             f"  watch:   hermes join {watch}\n"
             f"  control: hermes join {control}"
         )
-        write_json({"jsonrpc": "2.0", "method": "event", "params": {
+        fanout = server._stdio_transport
+        primary = getattr(fanout, "primary", fanout)
+        primary.write({"jsonrpc": "2.0", "method": "event", "params": {
             "type": "share.info",
             "payload": {"text": text},
         }})

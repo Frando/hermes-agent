@@ -39,6 +39,23 @@ def test_share_tickets_reports_current_tickets(monkeypatch):
     }
 
 
+def test_share_tickets_omits_control_for_non_host(monkeypatch):
+    # A joiner drives through its own transport (not the host stdio transport),
+    # so share.tickets must withhold the control ticket from it — otherwise a
+    # joiner could capture the control token and reconnect with control.
+    class _FakeHost:
+        tickets = ("WATCH-TICKET", "CONTROL-TICKET")
+
+    monkeypatch.setattr(server, "_iroh_share_host", _FakeHost())
+    joiner = _Recorder()
+    resp = server.dispatch(
+        {"jsonrpc": "2.0", "id": 3, "method": "share.tickets", "params": {}},
+        transport=joiner,
+    )
+    assert resp["result"] == {"sharing": True, "watch": "WATCH-TICKET"}
+    assert "control" not in resp["result"]
+
+
 def test_prompt_submit_gated_by_shared_controller(monkeypatch):
     """The host (stdio submitter) is refused while a joiner holds control."""
     from tui_gateway import iroh_share as sh

@@ -723,7 +723,9 @@ def shared_session_handle() -> Optional[tuple[str, str]]:
     try:
         _ensure_session_db_row(session)
     except Exception:
-        logger.debug("share: could not ensure session db row", exc_info=True)
+        # A missing DB row makes the joiner's session.resume fail opaquely, so
+        # this is worth surfacing rather than hiding at debug.
+        logger.warning("share: could not ensure session db row", exc_info=True)
     key = str(session.get("session_key") or "")
     if not key:
         return None
@@ -9330,7 +9332,13 @@ def _(rid, params: dict) -> dict:
     if not tickets:
         return _ok(rid, {"sharing": False})
     watch, control = tickets
-    return _ok(rid, {"sharing": True, "watch": watch, "control": control})
+    result = {"sharing": True, "watch": watch}
+    # Only the host (driving through the local stdio/fan-out transport) may read
+    # the control ticket. A joiner that reaches this method must never obtain the
+    # control token, so it can't be reused to reconnect with control or handed on.
+    if current_transport() is _stdio_transport:
+        result["control"] = control
+    return _ok(rid, result)
 
 
 # ── Methods: paste ────────────────────────────────────────────────────
