@@ -26,6 +26,7 @@ from hermes_constants import (
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tui_gateway.transport import (
+    FanoutTransport,
     StdioTransport,
     Transport,
     bind_transport,
@@ -652,6 +653,27 @@ def _transport_is_dead(transport) -> bool:
     if transport is _detached_ws_transport:
         return True
     return getattr(transport, "_closed", None) is True
+
+
+def _bind_session_transport(session: dict, transport: Optional[Transport]) -> None:
+    """Point a session at ``transport``, preserving any active fan-out.
+
+    A plain session owns a single transport, so binding replaces it (the
+    historical behavior: whichever client last submitted/resumed owns the event
+    stream). When the session is shared, its slot holds a
+    :class:`FanoutTransport`; binding then ADDS the client as an extra member
+    instead of replacing the slot, so attaching a second client (an observer or
+    a remote controller) does not steal the stream from the others. This is the
+    only behavioral change the sharing feature makes to the session model, and
+    it is a no-op when sharing is inactive.
+    """
+    if transport is None:
+        return
+    current = session.get("transport")
+    if isinstance(current, FanoutTransport):
+        current.add(transport)
+    else:
+        session["transport"] = transport
 
 
 def _session_is_evictable(sid: str, session: dict, now: float) -> bool:
@@ -4956,7 +4978,7 @@ def _live_session_payload(
         if cols is not None:
             session["cols"] = cols
         if transport is not None:
-            session["transport"] = transport
+            _bind_session_transport(session, transport)
         if touch:
             session["last_active"] = time.time()
         history = list(session.get("display_history_prefix") or []) + list(
@@ -6212,9 +6234,10 @@ def _(rid, params: dict) -> dict:
         return err
     # Re-bind to the current client transport for this request. This keeps
     # streaming events on the active websocket even if an earlier disconnect
-    # or fallback moved the session transport to stdio.
-    if (t := current_transport()) is not None:
-        session["transport"] = t
+    # or fallback moved the session transport to stdio. When the session is
+    # shared this adds the submitting client to the fan-out instead of stealing
+    # the stream from the other participants.
+    _bind_session_transport(session, current_transport())
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")

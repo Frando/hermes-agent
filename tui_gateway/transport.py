@@ -217,3 +217,79 @@ class TeeTransport:
                     sec.close()
                 except Exception:
                     pass
+
+
+class FanoutTransport:
+    """A primary transport plus a runtime-mutable set of extra members.
+
+    Unlike :class:`TeeTransport`, whose secondaries are fixed at construction,
+    a fan-out lets clients attach to and detach from one shared stream at
+    runtime. This is how more than one client observes a single gateway
+    session: the session's owning client is the primary, and each additional
+    client (an observer or a remote controller) is an extra member.
+
+    ``write`` returns the primary's result, so the session's liveness still
+    tracks its owner; extra members get best-effort copies and are pruned the
+    moment a write to them fails or raises. ``close`` releases the extras but
+    deliberately leaves the primary open, because the primary is typically the
+    process-wide stdio transport that must outlive any one session.
+    """
+
+    __slots__ = ("_primary", "_extras", "_lock", "_closed")
+
+    def __init__(self, primary: "Transport") -> None:
+        self._primary = primary
+        self._extras: list["Transport"] = []
+        self._lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def primary(self) -> "Transport":
+        return self._primary
+
+    def add(self, transport: "Transport") -> None:
+        """Attach an extra member. Adding the primary or a duplicate is a no-op."""
+        if transport is self._primary:
+            return
+        with self._lock:
+            if transport not in self._extras:
+                self._extras.append(transport)
+
+    def remove(self, transport: "Transport") -> None:
+        """Detach a member if present."""
+        with self._lock:
+            try:
+                self._extras.remove(transport)
+            except ValueError:
+                pass
+
+    def write(self, obj: dict) -> bool:
+        ok = self._primary.write(obj)
+        with self._lock:
+            extras = list(self._extras)
+        dead: list["Transport"] = []
+        for member in extras:
+            try:
+                if not member.write(obj):
+                    dead.append(member)
+            except Exception:
+                dead.append(member)
+        if dead:
+            with self._lock:
+                for member in dead:
+                    try:
+                        self._extras.remove(member)
+                    except ValueError:
+                        pass
+        return ok
+
+    def close(self) -> None:
+        self._closed = True
+        with self._lock:
+            extras = list(self._extras)
+            self._extras.clear()
+        for member in extras:
+            try:
+                member.close()
+            except Exception:
+                pass
