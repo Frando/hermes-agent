@@ -65,7 +65,7 @@ def test_grab_authorizes_submit_else_refused(monkeypatch):
     sid = server.active_shared_session_id()
 
     host = sh.IrohShareHost()
-    _watch, control = host.start(online_timeout=2)
+    _watch, control = host.share_active_session(online_timeout=2)
     # Connect over loopback in tests: id-only tickets need network discovery,
     # so dial the host's real direct address instead.
     monkeypatch.setattr(sh, "_connect_addr", lambda _i, _b: host._endpoint.addr())

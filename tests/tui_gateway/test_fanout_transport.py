@@ -3,9 +3,22 @@
 These cover the one behavioral change the iroh sharing feature makes to the
 gateway session model: a shared session fans events to several clients, and
 binding a client to such a session adds it instead of stealing the stream.
+
+Extras (joiners) receive only events the host emits, never responses to the
+host's own requests, so a response carrying host-only data (api keys, a control
+ticket) cannot leak to a joiner. Frames below carry a ``method`` so they count
+as events; ``_resp`` builds a response that must stay host-only.
 """
 
 from tui_gateway.transport import FanoutTransport
+
+
+def _ev(n):
+    return {"method": "event", "params": {"type": "t"}, "n": n}
+
+
+def _resp(n):
+    return {"id": n, "result": {"ok": True}}
 
 
 class _RecordingTransport:
@@ -26,17 +39,29 @@ class _RecordingTransport:
         self.closed = True
 
 
-def test_fanout_writes_to_primary_and_extras():
+def test_fanout_writes_events_to_primary_and_extras():
     primary = _RecordingTransport()
     a = _RecordingTransport()
     b = _RecordingTransport()
     fan = FanoutTransport(primary)
     fan.add(a)
     fan.add(b)
-    assert fan.write({"n": 1}) is True
-    assert primary.frames == [{"n": 1}]
-    assert a.frames == [{"n": 1}]
-    assert b.frames == [{"n": 1}]
+    assert fan.write(_ev(1)) is True
+    assert primary.frames == [_ev(1)]
+    assert a.frames == [_ev(1)]
+    assert b.frames == [_ev(1)]
+
+
+def test_fanout_does_not_broadcast_responses_to_extras():
+    # A response (id, no method) may carry host-only secrets; extras must not see
+    # it, but the primary (the host) always does.
+    primary = _RecordingTransport()
+    a = _RecordingTransport()
+    fan = FanoutTransport(primary)
+    fan.add(a)
+    assert fan.write(_resp(1)) is True
+    assert primary.frames == [_resp(1)]
+    assert a.frames == []
 
 
 def test_fanout_add_is_deduped_and_ignores_primary():
@@ -46,9 +71,9 @@ def test_fanout_add_is_deduped_and_ignores_primary():
     fan.add(a)
     fan.add(a)  # duplicate
     fan.add(primary)  # primary is never an extra
-    fan.write({"n": 1})
-    assert a.frames == [{"n": 1}]  # delivered once, not twice
-    assert primary.frames == [{"n": 1}]
+    fan.write(_ev(1))
+    assert a.frames == [_ev(1)]  # delivered once, not twice
+    assert primary.frames == [_ev(1)]
 
 
 def test_fanout_return_value_tracks_primary_only():
@@ -57,8 +82,8 @@ def test_fanout_return_value_tracks_primary_only():
     fan = FanoutTransport(primary)
     fan.add(a)
     # Primary dead -> write reports False even though the extra accepted it.
-    assert fan.write({"n": 1}) is False
-    assert a.frames == [{"n": 1}]
+    assert fan.write(_ev(1)) is False
+    assert a.frames == [_ev(1)]
 
 
 def test_fanout_prunes_dead_extras():
@@ -68,9 +93,9 @@ def test_fanout_prunes_dead_extras():
     fan = FanoutTransport(primary)
     fan.add(dead)
     fan.add(live)
-    fan.write({"n": 1})  # dead returns False -> pruned
-    fan.write({"n": 2})
-    assert live.frames == [{"n": 1}, {"n": 2}]
+    fan.write(_ev(1))  # dead returns False -> pruned
+    fan.write(_ev(2))
+    assert live.frames == [_ev(1), _ev(2)]
     assert dead.frames == []  # never accepted anything
 
 
@@ -80,9 +105,9 @@ def test_fanout_remove():
     fan = FanoutTransport(primary)
     fan.add(a)
     fan.remove(a)
-    fan.write({"n": 1})
+    fan.write(_ev(1))
     assert a.frames == []
-    assert primary.frames == [{"n": 1}]
+    assert primary.frames == [_ev(1)]
 
 
 def test_write_to_others_excludes_an_extra():
@@ -93,9 +118,9 @@ def test_write_to_others_excludes_an_extra():
     fan = FanoutTransport(primary)
     fan.add(submitter)
     fan.add(other)
-    fan.write_to_others({"n": 1}, exclude=submitter)
-    assert primary.frames == [{"n": 1}]
-    assert other.frames == [{"n": 1}]
+    fan.write_to_others(_ev(1), exclude=submitter)
+    assert primary.frames == [_ev(1)]
+    assert other.frames == [_ev(1)]
     assert submitter.frames == []
 
 
@@ -106,9 +131,9 @@ def test_write_to_others_excluding_fanout_skips_primary():
     joiner = _RecordingTransport()
     fan = FanoutTransport(primary)
     fan.add(joiner)
-    fan.write_to_others({"n": 1}, exclude=fan)
+    fan.write_to_others(_ev(1), exclude=fan)
     assert primary.frames == []        # host already rendered its own prompt
-    assert joiner.frames == [{"n": 1}]
+    assert joiner.frames == [_ev(1)]
 
 
 def test_fanout_close_releases_extras_not_primary():
@@ -140,8 +165,8 @@ def test_bind_helper_adds_for_shared_session():
     session = {"transport": fan}
     _bind_session_transport(session, joiner)
     assert session["transport"] is fan  # slot unchanged: no steal
-    fan.write({"n": 1})
-    assert joiner.frames == [{"n": 1}]  # joiner attached as an extra
+    fan.write(_ev(1))
+    assert joiner.frames == [_ev(1)]  # joiner attached as an extra
 
 
 def test_fanout_add_rejects_self():
@@ -149,8 +174,8 @@ def test_fanout_add_rejects_self():
     primary = _RecordingTransport()
     fan = FanoutTransport(primary)
     fan.add(fan)
-    fan.write({"n": 1})
-    assert primary.frames == [{"n": 1}]  # delivered exactly once, no recursion
+    fan.write(_ev(1))
+    assert primary.frames == [_ev(1)]  # delivered exactly once, no recursion
 
 
 def test_bind_helper_self_bind_is_noop():
@@ -162,8 +187,8 @@ def test_bind_helper_self_bind_is_noop():
     session = {"transport": fan}
     _bind_session_transport(session, fan)  # must not add fan to its own members
     assert session["transport"] is fan
-    fan.write({"n": 1})
-    assert primary.frames == [{"n": 1}]  # exactly once
+    fan.write(_ev(1))
+    assert primary.frames == [_ev(1)]  # exactly once
 
 
 def test_bind_helper_ignores_none():

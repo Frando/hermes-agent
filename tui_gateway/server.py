@@ -183,6 +183,7 @@ _LONG_HANDLERS = frozenset(
         "session.compress",
         "session.resume",
         "shell.exec",
+        "share.start",
         "skills.manage",
         "slash.exec",
     }
@@ -227,8 +228,8 @@ _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
 # must not fall through there while the session waits for resume or reap.
 _detached_ws_transport = _DropTransport()
 
-# Set by entry._install_iroh_share when the gateway starts in share mode; holds
-# the live IrohShareHost so share.tickets can report the current join tickets.
+# Set by entry._install_iroh_share for the TUI gateway; holds the process-wide
+# IrohShareHost that share.start/stop/status drive to share individual sessions.
 _iroh_share_host = None
 
 
@@ -6343,7 +6344,7 @@ def _(rid, params: dict) -> dict:
     # transport) on the shared controller so two panes cannot drive at once.
     share = _iroh_share_host
     if share is not None:
-        denied = share.control_denied(current_transport())
+        denied = share.control_denied(current_transport(), session.get("session_key"))
         if denied:
             return _err(rid, 4030, denied)
     # Re-bind to the current client transport for this request. This keeps
@@ -9063,9 +9064,10 @@ def _(rid, params: dict) -> dict:
     # host taking control back.
     if name == "grab":
         share = _iroh_share_host
-        if share is None:
+        key = str(session.get("session_key") or "") if session else ""
+        if share is None or not key or not share.is_shared(key):
             return _ok(rid, {"type": "exec", "output": "This session is not being shared."})
-        share.grab_host()
+        share.grab_host(key)
         return _ok(rid, {"type": "exec", "output": "You now control this session. Type to drive the agent."})
 
     # ── Commands that queue messages onto _pending_input in the CLI ───
@@ -9321,21 +9323,91 @@ def _(rid, params: dict) -> dict:
     return _err(rid, 4018, f"not a quick/plugin/skill command: {name}")
 
 
-@method("share.tickets")
-def _(rid, params: dict) -> dict:
-    """Return the current iroh share tickets, so /share can reprint them.
+def _share_info_text(watch: str, control: str) -> str:
+    return (
+        "Sharing this session over iroh.\n"
+        f"  watch:   hermes join {watch}\n"
+        f"  control: hermes join {control}"
+    )
 
-    Reports ``sharing: False`` when the gateway is not running in share mode.
+
+def _emit_share_info(watch: str, control: str) -> None:
+    """Print the join tickets to the HOST's own stdout only.
+
+    The tickets carry the secret control token, so this goes to the fan-out's
+    primary (the host's terminal) and never through the fan-out, where a joiner
+    could see it. The TUI renders the ``share.info`` event as the share banner.
+    """
+    fanout = _stdio_transport
+    primary = getattr(fanout, "primary", fanout)
+    primary.write({"jsonrpc": "2.0", "method": "event", "params": {
+        "type": "share.info", "payload": {"text": _share_info_text(watch, control)},
+    }})
+
+
+def _session_key_from_params(params: dict) -> tuple[Optional[dict], str]:
+    session = _sessions.get(params.get("session_id", ""))
+    key = str(session.get("session_key") or "") if session else ""
+    return session, key
+
+
+@method("share.start")
+def _(rid, params: dict) -> dict:
+    """Start sharing the current session; return and print its join tickets.
+
+    Sessions start unshared. This mints a watch and a control token for this
+    session, binds the shared iroh endpoint on first use, and registers the
+    tokens so a joiner presenting one is pinned to this session.
     """
     host = _iroh_share_host
-    tickets = getattr(host, "tickets", None) if host is not None else None
+    if host is None:
+        return _err(rid, 4001, "sharing is not available in this build")
+    # Only the host may share a session. A joiner cannot reach this (it is not in
+    # the acceptor's read-only allow-list), but refuse defensively in any case.
+    if current_transport() is not _stdio_transport:
+        return _err(rid, 4030, "only the host can share a session")
+    session, key = _session_key_from_params(params)
+    if session is None:
+        return _err(rid, 4004, "no such session")
+    if not key:
+        return _err(rid, 4004, "session has no persistent key yet")
+    try:
+        _ensure_session_db_row(session)
+    except Exception:
+        logger.warning("share: could not ensure session db row", exc_info=True)
+    try:
+        watch, control = host.share_session(params.get("session_id", ""), key)
+    except Exception as exc:
+        logger.warning("share: failed to start sharing: %s", exc)
+        return _err(rid, 5001, f"could not start sharing: {exc}")
+    _emit_share_info(watch, control)
+    return _ok(rid, {"sharing": True, "watch": watch, "control": control})
+
+
+@method("share.stop")
+def _(rid, params: dict) -> dict:
+    """Stop sharing the current session and disconnect its joiners."""
+    host = _iroh_share_host
+    _session, key = _session_key_from_params(params)
+    was = bool(host is not None and key and host.unshare_session(key))
+    return _ok(rid, {"sharing": False, "was_sharing": was})
+
+
+@method("share.status")
+def _(rid, params: dict) -> dict:
+    """Report whether the current session is shared, with its tickets.
+
+    The control ticket is returned only to the host transport; a joiner that
+    reaches this method gets the watch ticket alone, so it cannot capture the
+    control token.
+    """
+    host = _iroh_share_host
+    _session, key = _session_key_from_params(params)
+    tickets = host.session_tickets(key) if (host is not None and key) else None
     if not tickets:
         return _ok(rid, {"sharing": False})
     watch, control = tickets
     result = {"sharing": True, "watch": watch}
-    # Only the host (driving through the local stdio/fan-out transport) may read
-    # the control ticket. A joiner that reaches this method must never obtain the
-    # control token, so it can't be reused to reconnect with control or handed on.
     if current_transport() is _stdio_transport:
         result["control"] = control
     return _ok(rid, result)

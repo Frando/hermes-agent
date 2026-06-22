@@ -1,29 +1,42 @@
 import type { ShareTicketsResponse } from '../../../gatewayTypes.js'
+import { patchUiState } from '../../uiStore.js'
 import type { SlashCommand } from '../types.js'
 
 export const shareCommands: SlashCommand[] = [
   {
-    help: 'Show the join tickets for sharing this session',
+    help: 'Share this session and show its join tickets',
     name: 'share',
     run: (_arg, ctx) => {
+      // share.start mints this session's tokens and binds the shared endpoint on
+      // first use. On success the gateway emits a share.info event (routed to the
+      // host only), which renders the banner, so there is nothing to print here.
       ctx.gateway
-        .rpc<ShareTicketsResponse>('share.tickets', {})
+        .rpc<ShareTicketsResponse>('share.start', { session_id: ctx.sid })
         .then(
           ctx.guarded<ShareTicketsResponse>(res => {
-            if (!res.sharing || !res.control) {
-              ctx.transcript.sys(
-                'This session is not being shared. Relaunch with `hermes share` to share it.'
-              )
-
-              return
+            if (!res.sharing) {
+              ctx.transcript.sys('Could not share this session.')
             }
-
+          })
+        )
+        .catch(ctx.guardedErr)
+    }
+  },
+  {
+    help: 'Stop sharing this session',
+    name: 'unshare',
+    run: (_arg, ctx) => {
+      ctx.gateway
+        .rpc<ShareTicketsResponse>('share.stop', { session_id: ctx.sid })
+        .then(
+          ctx.guarded<ShareTicketsResponse>(res => {
+            // Clear the banner so the self-heal effect drops it and stops
+            // re-asserting it.
+            patchUiState({ shareInfo: null })
             ctx.transcript.sys(
-              [
-                'Sharing this session over iroh.',
-                `  watch:   hermes join ${res.watch}`,
-                `  control: hermes join ${res.control}`
-              ].join('\n')
+              res.was_sharing
+                ? 'Stopped sharing this session.'
+                : 'This session was not being shared.'
             )
           })
         )

@@ -247,6 +247,21 @@ class FanoutTransport:
     def primary(self) -> "Transport":
         return self._primary
 
+    @staticmethod
+    def _broadcastable(obj: dict) -> bool:
+        """Whether a frame may be forwarded to extra members (joiners).
+
+        Extras receive only events the host emits, never responses to the host's
+        own requests. A response carries an ``id`` and no ``method`` and may hold
+        host-only data (API keys from ``config.get``, the control ticket from
+        ``share.start``); fanning it out would leak it to every attached joiner.
+        Each joiner still receives responses to ITS OWN requests directly, since
+        those are written to its transport, not through this fan-out.
+        """
+        if not isinstance(obj, dict):
+            return True
+        return obj.get("method") is not None
+
     def add(self, transport: "Transport") -> None:
         """Attach an extra member. Adding the primary, self, or a duplicate is a no-op."""
         if transport is self._primary or transport is self:
@@ -265,6 +280,8 @@ class FanoutTransport:
 
     def write(self, obj: dict) -> bool:
         ok = self._primary.write(obj)
+        if not self._broadcastable(obj):
+            return ok
         with self._lock:
             extras = list(self._extras)
         dead: list["Transport"] = []
@@ -301,6 +318,8 @@ class FanoutTransport:
                 self._primary.write(obj)
             except Exception:
                 logger.warning("fanout: primary write failed", exc_info=True)
+        if not self._broadcastable(obj):
+            return
         with self._lock:
             extras = list(self._extras)
         dead: list["Transport"] = []

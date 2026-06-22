@@ -70,7 +70,7 @@ def test_iroh_joiner_attaches_and_receives_fanout(monkeypatch):
     assert sid, "expected a live host session"
 
     host = sh.IrohShareHost()
-    _watch, control = host.start(online_timeout=2)
+    _watch, control = host.share_active_session(online_timeout=2)
     # Connect over loopback in tests: id-only tickets need network discovery,
     # so dial the host's real direct address instead.
     monkeypatch.setattr(sh, "_connect_addr", lambda _i, _b: host._endpoint.addr())

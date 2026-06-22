@@ -56,6 +56,7 @@ export interface CreditsViewResponse {
 export interface ShareTicketsResponse {
   control?: string
   sharing: boolean
+  was_sharing?: boolean
   watch?: string
 }
 

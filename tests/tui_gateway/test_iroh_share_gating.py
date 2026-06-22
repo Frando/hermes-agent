@@ -1,22 +1,32 @@
 """Auth, grab, and frame-filtering logic for the iroh share acceptor.
 
 These exercise the security-critical gating without needing iroh or a live
-gateway: role assignment from tokens, the read-only allow-list, grab handling,
-and the per-session frame filter.
+gateway: per-session token assignment, the read-only allow-list, grab handling,
+and the per-session frame filter. Sharing is per-session: each shared session
+carries its own tokens and its own controller.
 """
 
 from tui_gateway import iroh_share as sh
 
 
-def _host():
+def _shared(key="k1", sid="s1", watch="watchtok", control="ctrltok"):
+    return sh._SharedSession(
+        key, sid, watch, control,
+        f"id/{watch}", f"id/{control}",
+    )
+
+
+def _host_with(shared):
+    """A host with one registered shared session (no endpoint bound)."""
     h = sh.IrohShareHost()
-    h._watch_token = "watchtok"
-    h._control_token = "ctrltok"
+    h._shared[shared.key] = shared
+    h._by_token[shared.watch_token] = (shared, sh.ROLE_WATCH)
+    h._by_token[shared.control_token] = (shared, sh.ROLE_CONTROL)
     return h
 
 
-def _client(role, cid="c1", name="x"):
-    return sh._Client(cid, name, role, transport=None, pinned_sid="s1", pinned_key="k1")
+def _client(role, shared, cid="c1", name="x"):
+    return sh._Client(cid, name, role, transport=None, shared=shared)
 
 
 def test_split_ticket():
@@ -34,12 +44,38 @@ def test_sanitize_strips_controls():
     assert sh._sanitize("a\x07b\x7f\r\n") == "ab"
 
 
-def test_role_for_token():
-    h = _host()
-    assert h._role_for_token("ctrltok") == sh.ROLE_CONTROL
-    assert h._role_for_token("watchtok") == sh.ROLE_WATCH
-    assert h._role_for_token("") is None
-    assert h._role_for_token("nope") is None
+def test_lookup_token_resolves_session_and_role():
+    shared = _shared()
+    h = _host_with(shared)
+    s, role = h._lookup_token("ctrltok")
+    assert s is shared and role == sh.ROLE_CONTROL
+    s, role = h._lookup_token("watchtok")
+    assert s is shared and role == sh.ROLE_WATCH
+    assert h._lookup_token("") == (None, None)
+    assert h._lookup_token("nope") == (None, None)
+
+
+def test_lookup_token_isolates_sessions():
+    # Two shared sessions, each with its own tokens, resolve independently.
+    a = _shared(key="ka", sid="sa", watch="wa", control="ca")
+    b = _shared(key="kb", sid="sb", watch="wb", control="cb")
+    h = sh.IrohShareHost()
+    for s in (a, b):
+        h._shared[s.key] = s
+        h._by_token[s.watch_token] = (s, sh.ROLE_WATCH)
+        h._by_token[s.control_token] = (s, sh.ROLE_CONTROL)
+    assert h._lookup_token("ca")[0] is a
+    assert h._lookup_token("wb")[0] is b
+
+
+def test_unshared_token_is_rejected():
+    # Once a session is unshared its tokens resolve to nothing, so a holder of an
+    # old ticket can no longer connect.
+    shared = _shared()
+    h = _host_with(shared)
+    assert h.unshare_session("k1") is True
+    assert h._lookup_token("ctrltok") == (None, None)
+    assert h.unshare_session("k1") is False  # already gone
 
 
 def test_is_grab():
@@ -51,8 +87,8 @@ def test_is_grab():
 
 
 def test_watch_role_blocked_from_mutating():
-    h = _host()
-    watcher = _client(sh.ROLE_WATCH)
+    h = _host_with(_shared())
+    watcher = _client(sh.ROLE_WATCH, h._shared["k1"])
     assert h._authorized(watcher, "commands.catalog") is True  # read-only allowed
     assert h._authorized(watcher, "session.resume") is True    # attach allowed
     assert h._authorized(watcher, "prompt.submit") is False    # mutating denied
@@ -65,62 +101,76 @@ def test_watch_role_blocked_from_mutating():
 
 
 def test_session_enumeration_denied_for_watchers():
-    # A joiner must not be able to enumerate the host's other sessions.
-    h = _host()
-    watcher = _client(sh.ROLE_WATCH)
+    h = _host_with(_shared())
+    watcher = _client(sh.ROLE_WATCH, h._shared["k1"])
     assert h._authorized(watcher, "session.list") is False
     assert h._authorized(watcher, "session.active_list") is False
     assert h._authorized(watcher, "session.most_recent") is False
 
 
 def test_unknown_method_is_treated_as_mutating():
-    h = _host()
-    watcher = _client(sh.ROLE_WATCH)
-    controller = _client(sh.ROLE_CONTROL)
-    # A method not in the read-only set fails closed for watch.
+    h = _host_with(_shared())
+    shared = h._shared["k1"]
+    watcher = _client(sh.ROLE_WATCH, shared)
+    controller = _client(sh.ROLE_CONTROL, shared)
     assert h._authorized(watcher, "some.future_method") is False
-    # And requires control for a controller.
     assert h._authorized(controller, "some.future_method") is False
 
 
 def test_control_requires_holding_grab():
-    h = _host()
-    controller = _client(sh.ROLE_CONTROL, cid="c1")
-    # Read-only always allowed.
+    h = _host_with(_shared())
+    controller = _client(sh.ROLE_CONTROL, h._shared["k1"], cid="c1")
     assert h._authorized(controller, "commands.catalog") is True
-    # Mutating denied until this client holds control.
     assert h._authorized(controller, "prompt.submit") is False
     h._grab(controller)
-    assert h._controller is controller
+    assert h._shared["k1"].controller is controller
     assert h._authorized(controller, "prompt.submit") is True
 
 
 def test_grab_is_refused_for_watch():
-    h = _host()
-    watcher = _client(sh.ROLE_WATCH, cid="w1")
+    h = _host_with(_shared())
+    watcher = _client(sh.ROLE_WATCH, h._shared["k1"], cid="w1")
     h._grab(watcher)
-    assert h._controller is None  # watch can never take control; host keeps it
+    assert h._shared["k1"].controller is None  # watch can never take control
 
 
 def test_second_controller_steals_grab():
-    h = _host()
-    a = _client(sh.ROLE_CONTROL, cid="a")
-    b = _client(sh.ROLE_CONTROL, cid="b")
+    h = _host_with(_shared())
+    shared = h._shared["k1"]
+    a = _client(sh.ROLE_CONTROL, shared, cid="a")
+    b = _client(sh.ROLE_CONTROL, shared, cid="b")
     h._grab(a)
     assert h._authorized(a, "prompt.submit") is True
     h._grab(b)
-    assert h._controller is b
+    assert shared.controller is b
     assert h._authorized(a, "prompt.submit") is False  # a lost control
     assert h._authorized(b, "prompt.submit") is True
 
 
+def test_control_is_per_session():
+    # Grabbing control of one session does not grant control of another.
+    a = _shared(key="ka", sid="sa", watch="wa", control="ca")
+    b = _shared(key="kb", sid="sb", watch="wb", control="cb")
+    h = sh.IrohShareHost()
+    for s in (a, b):
+        h._shared[s.key] = s
+    ca = _client(sh.ROLE_CONTROL, a, cid="ca")
+    h._grab(ca)
+    assert a.controller is ca
+    assert b.controller is None
+    # The controller of A is not authorized to drive B.
+    cb_view = _client(sh.ROLE_CONTROL, b, cid="ca")
+    assert h._authorized(cb_view, "prompt.submit") is False
+
+
 def test_host_is_default_controller_and_can_grab_back():
-    # Central control includes the host: the stdio (fan-out) transport is the
-    # controller by default; a joiner grab transfers it; grab_host reclaims it.
+    # The stdio (fan-out) transport is the controller by default for a shared
+    # session; a joiner grab transfers it; grab_host reclaims it.
     from tui_gateway import server
 
-    h = _host()
-    a = _client(sh.ROLE_CONTROL, cid="a")
+    h = _host_with(_shared())
+    shared = h._shared["k1"]
+    a = _client(sh.ROLE_CONTROL, shared, cid="a")
 
     class _T:
         def write(self, o):
@@ -128,22 +178,26 @@ def test_host_is_default_controller_and_can_grab_back():
 
     a.transport = _T()
 
-    # Default: host holds control (the stdio transport drives, joiners do not).
-    assert h.is_controller(server._stdio_transport) is True
-    assert h.control_denied(server._stdio_transport) is None
-    assert h.is_controller(a.transport) is False
-    assert "has control" in (h.control_denied(a.transport) or "")
+    assert h.control_denied(server._stdio_transport, "k1") is None
+    assert "has control" in (h.control_denied(a.transport, "k1") or "")
 
-    # Joiner grabs: now the host's stdio transport is refused, the joiner drives.
     h._grab(a)
-    assert h.is_controller(a.transport) is True
-    assert h.is_controller(server._stdio_transport) is False
-    assert "has control" in (h.control_denied(server._stdio_transport) or "")
+    assert h.control_denied(a.transport, "k1") is None
+    assert "has control" in (h.control_denied(server._stdio_transport, "k1") or "")
 
-    # Host grabs back.
-    h.grab_host()
-    assert h.is_controller(server._stdio_transport) is True
-    assert h.is_controller(a.transport) is False
+    h.grab_host("k1")
+    assert h.control_denied(server._stdio_transport, "k1") is None
+    assert "has control" in (h.control_denied(a.transport, "k1") or "")
+
+
+def test_control_denied_is_noop_for_unshared_session():
+    # When a session is not shared, no one is gated: the host drives freely.
+    h = sh.IrohShareHost()
+    from tui_gateway import server
+
+    assert h.control_denied(server._stdio_transport, "not-shared") is None
+    assert h.control_denied(object(), "not-shared") is None
+    assert h.control_denied(object(), "") is None
 
 
 def test_frame_filter_session_scoping():

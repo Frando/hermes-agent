@@ -49,18 +49,15 @@ def _install_sidecar_publisher() -> None:
 
 
 def _install_iroh_share() -> None:
-    """Start the iroh share acceptor when ``HERMES_TUI_SHARE`` is set.
+    """Make session sharing available; the user shares per-session with ``/share``.
 
-    Enables the session fan-out synchronously so every session created in this
-    process is shareable, then boots the iroh endpoint on a background thread so
-    bind/relay latency never delays ``gateway.ready``. Posts the join tickets as
-    a sticky notice once the endpoint is up. Best-effort: a sharing failure never
-    breaks the TUI.
+    Upgrades the process stdio transport to a fan-out so any session can take on
+    joiners, and creates the share host. The iroh endpoint is NOT bound here: it
+    binds lazily the first time a session is shared, so a user who never shares
+    pays no iroh cost. ``hermes share`` still launches with the first session
+    shared, which the TUI drives by issuing ``share.start`` once it is ready.
+    Best-effort: a setup failure never breaks the TUI.
     """
-    if (os.environ.get("HERMES_TUI_SHARE") or "").strip().lower() not in {
-        "1", "true", "yes", "on",
-    }:
-        return
     try:
         server.enable_sharing_fanout()
     except Exception:
@@ -71,11 +68,18 @@ def _install_iroh_share() -> None:
         return
 
     import atexit
-    import threading as _share_threading
+
+    try:
+        from tui_gateway.iroh_share import IrohShareHost
+
+        server._iroh_share_host = IrohShareHost()
+    except Exception:
+        logger.warning("iroh share: failed to create share host", exc_info=True)
+        return
 
     def _stop_share_host() -> None:
-        # Close the iroh endpoint on a clean exit so the relay drops our
-        # mapping and in-flight joiners are torn down rather than abandoned.
+        # Close the iroh endpoint on a clean exit so the relay drops our mapping
+        # and in-flight joiners are torn down rather than abandoned.
         host = getattr(server, "_iroh_share_host", None)
         if host is not None:
             try:
@@ -84,46 +88,6 @@ def _install_iroh_share() -> None:
                 logger.debug("iroh share: stop failed", exc_info=True)
 
     atexit.register(_stop_share_host)
-
-    def _boot() -> None:
-        try:
-            from tui_gateway.iroh_share import IrohShareHost
-
-            host = IrohShareHost()
-            watch, control = host.start()
-            server._iroh_share_host = host  # keep a reference alive
-        except Exception as exc:
-            logger.warning("iroh share failed to start: %s", exc)
-            write_json({"jsonrpc": "2.0", "method": "event", "params": {
-                "type": "notification.show",
-                "payload": {
-                    "text": f"[share] could not start: {exc}",
-                    "kind": "sticky", "level": "warn",
-                },
-            }})
-            return
-        # Emit share.info so the TUI prints the tickets in the transcript on
-        # startup, exactly as if /share had been typed (rather than a transient
-        # toast). Write it to the HOST's own stdout transport (the fan-out's
-        # primary), NEVER through the fan-out: the message carries the secret
-        # control ticket, and broadcasting it would hand control to any attached
-        # joiner (a watch joiner could escalate). Routing to the primary makes
-        # that impossible regardless of who is attached when this fires.
-        text = (
-            "Sharing this session over iroh.\n"
-            f"  watch:   hermes join {watch}\n"
-            f"  control: hermes join {control}"
-        )
-        fanout = server._stdio_transport
-        primary = getattr(fanout, "primary", fanout)
-        primary.write({"jsonrpc": "2.0", "method": "event", "params": {
-            "type": "share.info",
-            "payload": {"text": text},
-        }})
-
-    _share_threading.Thread(
-        target=_boot, name="hermes-tui-share-boot", daemon=True
-    ).start()
 
 
 # How long to wait for orderly shutdown (atexit + finalisers) before

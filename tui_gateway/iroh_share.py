@@ -224,20 +224,54 @@ class _ClientTransport:
             pass
 
 
+class _SharedSession:
+    """One session the host has shared, with its own tokens and controller.
+
+    The endpoint is shared across all shared sessions, but each session gets its
+    own watch and control tokens and tracks its own controller, so control is
+    negotiated independently per session.
+    """
+
+    __slots__ = (
+        "key", "sid", "watch_token", "control_token",
+        "watch_ticket", "control_ticket", "controller",
+    )
+
+    def __init__(self, key: str, sid: str, watch_token: str, control_token: str,
+                 watch_ticket: str, control_ticket: str):
+        self.key = key
+        self.sid = sid
+        self.watch_token = watch_token
+        self.control_token = control_token
+        self.watch_ticket = watch_ticket
+        self.control_ticket = control_ticket
+        # None means the host (the local pane) drives this session; a _Client
+        # means that joiner holds control. Only one party drives at a time.
+        self.controller: Optional["_Client"] = None
+
+
 class _Client:
-    __slots__ = ("cid", "name", "role", "transport", "pinned_sid", "pinned_key")
+    __slots__ = ("cid", "name", "role", "transport", "shared", "conn")
 
     def __init__(self, cid: str, name: str, role: str, transport: _ClientTransport,
-                 pinned_sid: Optional[str], pinned_key: Optional[str]):
+                 shared: _SharedSession):
         self.cid = cid
         self.name = name
         self.role = role
         self.transport = transport
-        # The joiner addresses the shared session two ways: the ephemeral id on
-        # events and prompt.submit, and the resume key on session.resume. Both
-        # are allowed; anything else is a different session and refused.
-        self.pinned_sid = pinned_sid
-        self.pinned_key = pinned_key
+        self.shared = shared
+        self.conn = None
+
+    # The joiner addresses the shared session two ways: the ephemeral id on
+    # events and prompt.submit, and the resume key on session.resume. Both are
+    # allowed; anything else is a different session and refused.
+    @property
+    def pinned_sid(self) -> str:
+        return self.shared.sid
+
+    @property
+    def pinned_key(self) -> str:
+        return self.shared.key
 
 
 class IrohShareHost:
@@ -247,41 +281,57 @@ class IrohShareHost:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._endpoint = None
+        self._endpoint_b32: Optional[str] = None
         self._clients: dict[str, _Client] = {}
-        # The single controller across ALL participants. None means the host
-        # (the local `hermes share` pane) holds control; a _Client means that
-        # joiner does. Only one party can drive the agent at a time.
-        self._controller: Optional[_Client] = None
-        self._watch_token = ""
-        self._control_token = ""
-        self._tickets: Optional[tuple[str, str]] = None
+        # Per-session registry, guarded by _reg_lock because it is touched from
+        # the gateway thread (share/unshare) and the acceptor loop (hello/grab).
+        self._shared: dict[str, _SharedSession] = {}   # session_key -> shared
+        self._by_token: dict[str, tuple[_SharedSession, str]] = {}  # token -> (shared, role)
+        self._reg_lock = threading.Lock()
         self._ready = threading.Event()
         self._error: Optional[BaseException] = None
         self._closing = False
+        self._started = False
+        self._start_lock = threading.Lock()
 
-    # -- lifecycle ---------------------------------------------------------
+    # -- endpoint lifecycle (bound lazily on the first share) --------------
 
-    def start(self, online_timeout: float = _ONLINE_TIMEOUT) -> tuple[str, str]:
-        """Bind the endpoint; return (watch_ticket, control_ticket)."""
-        if self._tickets is not None:
-            return self._tickets
-        self._watch_token = secrets.token_urlsafe(12)
-        self._control_token = secrets.token_urlsafe(12)
-        self._thread = threading.Thread(
-            target=self._run, args=(online_timeout,), name="hermes-tui-share", daemon=True
-        )
-        self._thread.start()
-        self._ready.wait(timeout=online_timeout + 15)
-        if self._error is not None:
-            raise ShareError(f"failed to start sharing: {self._error}") from self._error
-        if self._tickets is None:
-            raise ShareError("sharing endpoint did not start in time")
-        return self._tickets
+    def ensure_started(self, online_timeout: float = _ONLINE_TIMEOUT) -> None:
+        """Bind the iroh endpoint once, lazily. Raise ShareError on failure.
+
+        The endpoint is process-wide and shared by every shared session, so it
+        is bound the first time any session is shared rather than at startup,
+        which keeps iroh entirely out of the picture for users who never share.
+        """
+        with self._start_lock:
+            if self._started:
+                return
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run, args=(online_timeout,),
+                    name="hermes-tui-share", daemon=True,
+                )
+                self._thread.start()
+            self._ready.wait(timeout=online_timeout + 15)
+            if self._error is not None:
+                raise ShareError(f"failed to start sharing: {self._error}") from self._error
+            if self._endpoint_b32 is None:
+                raise ShareError("sharing endpoint did not start in time")
+            self._started = True
 
     @property
-    def tickets(self) -> Optional[tuple[str, str]]:
-        """The (watch, control) tickets once bound, else None."""
-        return self._tickets
+    def shared_count(self) -> int:
+        with self._reg_lock:
+            return len(self._shared)
+
+    def is_shared(self, key: str) -> bool:
+        with self._reg_lock:
+            return key in self._shared
+
+    def session_tickets(self, key: str) -> Optional[tuple[str, str]]:
+        with self._reg_lock:
+            shared = self._shared.get(key)
+            return (shared.watch_ticket, shared.control_ticket) if shared else None
 
     def stop(self) -> None:
         self._closing = True
@@ -294,12 +344,100 @@ class IrohShareHost:
         if self._thread is not None:
             self._thread.join(timeout=5)
 
+    # -- share / unshare (called on the gateway thread) --------------------
+
+    def share_session(self, sid: str, key: str,
+                      online_timeout: float = _ONLINE_TIMEOUT) -> tuple[str, str]:
+        """Share the session, returning ``(watch_ticket, control_ticket)``.
+
+        Idempotent: re-sharing an already-shared session returns the same
+        tickets and refreshes the ephemeral id in case the live session was
+        rebound to a new one.
+        """
+        self.ensure_started(online_timeout)
+        with self._reg_lock:
+            shared = self._shared.get(key)
+            if shared is not None:
+                shared.sid = sid
+                return shared.watch_ticket, shared.control_ticket
+            base = self._endpoint_b32
+            watch_token = secrets.token_urlsafe(12)
+            control_token = secrets.token_urlsafe(12)
+            shared = _SharedSession(
+                key, sid, watch_token, control_token,
+                f"{base}{_TICKET_SEP}{watch_token}",
+                f"{base}{_TICKET_SEP}{control_token}",
+            )
+            self._shared[key] = shared
+            self._by_token[watch_token] = (shared, ROLE_WATCH)
+            self._by_token[control_token] = (shared, ROLE_CONTROL)
+            return shared.watch_ticket, shared.control_ticket
+
+    def share_active_session(
+        self, online_timeout: float = _ONLINE_TIMEOUT
+    ) -> Optional[tuple[str, str]]:
+        """Share the gateway's most recently active live session.
+
+        A convenience over :meth:`share_session` for the ``hermes share``
+        auto-start path and tests: it resolves the active session (ensuring its
+        DB row) and shares it. Returns the tickets, or None when there is no live
+        session to share.
+        """
+        handle = server.shared_session_handle()
+        if handle is None:
+            return None
+        sid, key = handle
+        return self.share_session(sid, key, online_timeout)
+
+    def unshare_session(self, key: str) -> bool:
+        """Stop sharing the session and disconnect its joiners.
+
+        Returns False when the session was not shared.
+        """
+        with self._reg_lock:
+            shared = self._shared.pop(key, None)
+            if shared is None:
+                return False
+            self._by_token.pop(shared.watch_token, None)
+            self._by_token.pop(shared.control_token, None)
+        loop = self._loop
+        if loop is not None:
+            try:
+                loop.call_soon_threadsafe(self._drop_session_clients, key)
+            except RuntimeError:
+                pass
+        return True
+
+    def _drop_session_clients(self, key: str) -> None:
+        # Runs on the acceptor loop: notify and disconnect the joiners of an
+        # unshared session. Closing the connection ends each read loop, whose
+        # finally then prunes the client and its transport.
+        for client in list(self._clients.values()):
+            if client.shared.key != key:
+                continue
+            try:
+                client.transport.write({
+                    "jsonrpc": "2.0", "method": "event", "params": {
+                        "type": "notification.show",
+                        "payload": {"text": "[share] the host stopped sharing this session.",
+                                    "kind": "ttl", "ttl_ms": 6000, "level": "warn"},
+                    },
+                })
+            except Exception:
+                pass
+            conn = client.conn
+            if conn is not None:
+                try:
+                    conn.close(0, b"unshared")
+                except Exception:
+                    pass
+
     def _run(self, online_timeout: float) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._bind(online_timeout))
-        except BaseException as exc:  # noqa: BLE001 - surfaced via start()
+        except BaseException as exc:  # noqa: BLE001 - surfaced via ensure_started()
             self._error = exc
             self._ready.set()
             self._loop.close()
@@ -318,11 +456,7 @@ class IrohShareHost:
             await asyncio.wait_for(self._endpoint.online(), timeout=online_timeout)
         except Exception:
             pass
-        base = _encode_id(self._endpoint.id())
-        self._tickets = (
-            f"{base}{_TICKET_SEP}{self._watch_token}",
-            f"{base}{_TICKET_SEP}{self._control_token}",
-        )
+        self._endpoint_b32 = _encode_id(self._endpoint.id())
         self._loop.create_task(self._accept_loop())
 
     def _begin_shutdown(self) -> None:
@@ -387,8 +521,10 @@ class IrohShareHost:
             if not hello or hello.get("type") != "hello":
                 await self._raw_write(send, {"type": "error", "message": "expected hello"})
                 return
-            role = self._role_for_token(hello.get("token") or "")
-            if role is None:
+            shared, role = self._lookup_token(hello.get("token") or "")
+            if shared is None:
+                # The token matches no shared session: either the ticket is
+                # wrong or the host has stopped sharing that session.
                 await self._raw_write(send, {"type": "error", "message": "invalid ticket"})
                 return
             if len(self._clients) >= _MAX_CLIENTS:
@@ -396,24 +532,12 @@ class IrohShareHost:
                 return
             name = _sanitize((hello.get("name") or "guest")).strip()[:40] or "guest"
 
-            handle = server.shared_session_handle()
-            if handle is None:
-                # No live session to attach to. Refuse rather than create a
-                # client with no pinned session, which would defeat the
-                # per-session frame filter.
-                await self._raw_write(send, {
-                    "type": "error", "message": "host has no shareable session yet",
-                })
-                return
-            sid, resume_key = handle
-
-            # Events and prompt.submit use the ephemeral id, so the event filter
-            # and submit pin track it; the joiner resumes by the resume key.
-            transport = _ClientTransport(send, self._loop, sid)
-            client = _Client(
-                secrets.token_hex(4), name, role, transport,
-                pinned_sid=sid, pinned_key=resume_key,
-            )
+            # The token determines the session: events and prompt.submit use the
+            # ephemeral id (so the event filter and submit pin track it); the
+            # joiner resumes by the resume key.
+            transport = _ClientTransport(send, self._loop, shared.sid)
+            client = _Client(secrets.token_hex(4), name, role, transport, shared)
+            client.conn = conn
 
             # Send the welcome and gateway.ready FIRST, then attach to the
             # fan-out. Attaching last guarantees the joiner cannot receive a
@@ -422,8 +546,8 @@ class IrohShareHost:
             # exact live session (resume is keyed by the persistent key, not the
             # ephemeral id) and gets the ephemeral id back to drive it with.
             await self._raw_write(send, {
-                "type": "welcome", "role": role, "session_id": resume_key,
-                "controller": self._controller_name(),
+                "type": "welcome", "role": role, "session_id": shared.key,
+                "controller": self._holder_name(shared),
             })
             await self._raw_write(send, {
                 "jsonrpc": "2.0", "method": "event",
@@ -431,15 +555,15 @@ class IrohShareHost:
             })
             self._clients[client.cid] = client
             server.attach_shared_transport(transport)
-            self._notice(f"{name} joined ({role})")
+            self._notice(shared, f"{name} joined ({role})")
             await self._read_loop(client, reader)
         finally:
             if client is not None:
                 self._clients.pop(client.cid, None)
-                if self._controller is client:
+                if client.shared.controller is client:
                     # The controller left; control returns to the host.
-                    self._set_controller(None)
-                self._notice(f"{client.name} left")
+                    self._set_controller(client.shared, None)
+                self._notice(client.shared, f"{client.name} left")
             if transport is not None:
                 server.detach_shared_transport(transport)
                 transport.close()
@@ -513,12 +637,21 @@ class IrohShareHost:
 
     # -- auth + control ----------------------------------------------------
 
-    def _role_for_token(self, token: str) -> Optional[str]:
-        if token and secrets.compare_digest(token, self._control_token):
-            return ROLE_CONTROL
-        if token and secrets.compare_digest(token, self._watch_token):
-            return ROLE_WATCH
-        return None
+    def _lookup_token(self, token: str) -> tuple[Optional[_SharedSession], Optional[str]]:
+        """Resolve a token to its ``(shared_session, role)``, else ``(None, None)``.
+
+        Compared in constant time against every registered token so a wrong
+        token cannot be distinguished from one for a no-longer-shared session by
+        timing. The loop does not break early for the same reason.
+        """
+        if not token:
+            return None, None
+        with self._reg_lock:
+            match: Optional[tuple[_SharedSession, str]] = None
+            for registered, entry in self._by_token.items():
+                if secrets.compare_digest(token, registered):
+                    match = entry
+            return match if match is not None else (None, None)
 
     @staticmethod
     def _is_grab(method, params) -> bool:
@@ -533,75 +666,92 @@ class IrohShareHost:
             return False
         if method in _READ_ONLY_METHODS:
             return True
-        # Mutating: only the controlling client may drive the agent.
-        return self._controller is client
+        # Mutating: only the client controlling THIS session may drive the agent.
+        return client.shared.controller is client
 
     def _deny_reason(self, client: _Client, method: Optional[str]) -> str:
         if client.role != ROLE_CONTROL:
             return "watch-only: this ticket cannot control the session"
-        return f"{self._controller_name()} has control. Type /grab to take it."
+        return f"{self._holder_name(client.shared)} has control. Type /grab to take it."
 
     def _grab(self, client: _Client) -> bool:
         if client.role != ROLE_CONTROL:
-            self._notice("watch-only ticket cannot take control", only=client)
+            self._notice(client.shared, "watch-only ticket cannot take control", only=client)
             return False
-        self._set_controller(client)
+        self._set_controller(client.shared, client)
         return True
 
     # -- public control API (consulted by the gateway's prompt.submit) --------
 
-    def grab_host(self) -> None:
-        """Return control to the host (the local ``hermes share`` pane)."""
-        self._set_controller(None)
+    def grab_host(self, key: str) -> None:
+        """Return control of session ``key`` to the host (the local pane)."""
+        with self._reg_lock:
+            shared = self._shared.get(key)
+        if shared is not None:
+            self._set_controller(shared, None)
 
-    def is_controller(self, transport) -> bool:
-        """Whether ``transport`` belongs to the current controller.
+    def control_denied(self, transport, key: str) -> Optional[str]:
+        """A refusal message if ``transport`` may not drive session ``key``.
 
-        The host drives through the process stdio transport (the fan-out); a
-        joiner drives through its own client transport.
+        Returns None when the session is not shared (the host drives it freely)
+        or when ``transport`` is the session's current controller. The host
+        drives through the process stdio transport (the fan-out); a joiner drives
+        through its own client transport.
         """
-        ctrl = self._controller
-        if ctrl is None:
-            return transport is server._stdio_transport
-        return transport is ctrl.transport
-
-    def control_denied(self, transport) -> Optional[str]:
-        """A refusal message if ``transport`` is not the controller, else None."""
-        if self.is_controller(transport):
+        if not key:
             return None
-        return f"{self._controller_name()} has control. Type /grab to take it."
+        with self._reg_lock:
+            shared = self._shared.get(key)
+        if shared is None:
+            return None
+        ctrl = shared.controller
+        if ctrl is None:
+            if transport is server._stdio_transport:
+                return None
+        elif transport is ctrl.transport:
+            return None
+        return f"{self._holder_name(shared)} has control. Type /grab to take it."
 
-    def _set_controller(self, client: Optional[_Client]) -> None:
-        if self._controller is client:
+    def _set_controller(self, shared: _SharedSession, client: Optional[_Client]) -> None:
+        if shared.controller is client:
             return
-        self._controller = client
-        # Announce to everyone (host + joiners) so all panes agree on who drives.
-        holder = self._controller_name()
+        shared.controller = client
+        # Announce to this session's participants so all panes agree on who
+        # drives. session_id scopes it so only this session's panes see it.
+        self._broadcast(shared, f"{self._holder_name(shared)} now has control.")
+
+    def _holder_name(self, shared: _SharedSession) -> str:
+        return shared.controller.name if shared.controller is not None else "host"
+
+    def _notice(self, shared: _SharedSession, text: str,
+                only: Optional[_Client] = None) -> None:
+        if only is not None:
+            frame = {"jsonrpc": "2.0", "method": "event", "params": {
+                "type": "notification.show",
+                "payload": {"text": f"[share] {text}", "kind": "ttl",
+                            "ttl_ms": 6000, "level": "info"},
+            }}
+            try:
+                only.transport.write(frame)
+            except Exception:
+                pass
+            return
+        self._broadcast(shared, text)
+
+    def _broadcast(self, shared: _SharedSession, text: str) -> None:
+        # notification.show is the gateway's toast channel. session_id scopes the
+        # toast to this session's panes (host pane + this session's joiners); the
+        # per-session frame filter drops it for joiners on other sessions.
+        # 'ttl' self-expires. write_json reaches the host primary and the joiners.
         try:
             server.write_json({"jsonrpc": "2.0", "method": "event", "params": {
                 "type": "notification.show",
-                "payload": {"text": f"[share] {holder} now has control.",
-                            "kind": "ttl", "ttl_ms": 6000, "level": "info"},
+                "session_id": shared.sid,
+                "payload": {"text": f"[share] {text}", "kind": "ttl",
+                            "ttl_ms": 6000, "level": "info"},
             }})
         except Exception:
             pass
-
-    def _controller_name(self) -> str:
-        return self._controller.name if self._controller is not None else "host"
-
-    def _notice(self, text: str, only: Optional[_Client] = None) -> None:
-        # notification.show is the gateway's toast channel; no session_id so the
-        # TUI does not drop it as belonging to another session. 'ttl' self-expires.
-        frame = {"jsonrpc": "2.0", "method": "event", "params": {
-            "type": "notification.show",
-            "payload": {"text": f"[share] {text}", "kind": "ttl", "ttl_ms": 6000, "level": "info"},
-        }}
-        targets = [only] if only is not None else list(self._clients.values())
-        for c in targets:
-            try:
-                c.transport.write(frame)
-            except Exception:
-                pass
 
     async def _raw_write(self, send, obj: dict) -> None:
         try:
