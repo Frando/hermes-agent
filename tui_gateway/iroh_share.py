@@ -37,6 +37,9 @@ ALPN = b"hermes-share/0"
 # addresses by iroh discovery, so no addresses are embedded) and a role token.
 # Neither part contains a slash, so the last slash separates them.
 _TICKET_SEP = "/"
+# Share tickets are rendered as a `hermes:` URI so they can be clicked as links
+# (the apps register the scheme). Parsing also accepts a bare endpoint/token.
+_TICKET_SCHEME = "hermes:"
 _READ_CHUNK = 64 * 1024
 _MAX_LINE_BYTES = 1024 * 1024
 _MAX_CLIENTS = 32
@@ -118,6 +121,11 @@ def _require_iroh():
 
 def _split_ticket(shared: str) -> tuple[str, str]:
     shared = shared.strip()
+    # Accept the `hermes:` share-link scheme (with or without `//`).
+    for prefix in ("hermes://", "hermes:"):
+        if shared.startswith(prefix):
+            shared = shared[len(prefix):]
+            break
     if _TICKET_SEP not in shared:
         raise ValueError("not a valid share ticket (missing token)")
     base, token = shared.rsplit(_TICKET_SEP, 1)
@@ -396,8 +404,8 @@ class IrohShareHost:
             control_token = secrets.token_urlsafe(12)
             shared = _SharedSession(
                 key, sid, watch_token, control_token,
-                f"{base}{_TICKET_SEP}{watch_token}",
-                f"{base}{_TICKET_SEP}{control_token}",
+                f"{_TICKET_SCHEME}{base}{_TICKET_SEP}{watch_token}",
+                f"{_TICKET_SCHEME}{base}{_TICKET_SEP}{control_token}",
             )
             self._shared[key] = shared
             self._by_token[watch_token] = (shared, ROLE_WATCH)
