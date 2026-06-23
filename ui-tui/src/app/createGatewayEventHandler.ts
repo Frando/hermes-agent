@@ -519,6 +519,15 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       }
 
+      case 'control.update': {
+        // Who drives this shared session. "host" (or absent) means we drive, so
+        // clear the indicator; a joiner's name shows in the status bar.
+        const controller = ev.payload?.controller
+        patchUiState({ controlHolder: controller && controller !== 'host' ? controller : null })
+
+        return
+      }
+
       case 'notification.show': {
         // Credits/usage notice from the gateway. Payload is snake_case on the
         // wire and stays snake_case in UiState.notice (no mapping layer). The

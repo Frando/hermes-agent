@@ -756,9 +756,16 @@ class IrohShareHost:
         if shared.controller is client:
             return
         shared.controller = client
+        holder = self._holder_name(shared)
         # Announce to this session's participants so all panes agree on who
         # drives. session_id scopes it so only this session's panes see it.
-        self._broadcast(shared, f"{self._holder_name(shared)} now has control.")
+        self._broadcast(shared, f"{holder} now has control.")
+        # Structured counterpart of the toast: lets panes (the TUI status bar, the
+        # dioxus client) track the holder precisely rather than parsing the text.
+        try:
+            server._emit("control.update", shared.sid, {"controller": holder})
+        except Exception:
+            pass
 
     def _holder_name(self, shared: _SharedSession) -> str:
         return shared.controller.name if shared.controller is not None else "host"

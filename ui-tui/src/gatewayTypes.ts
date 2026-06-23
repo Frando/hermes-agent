@@ -622,6 +622,7 @@ export type GatewayEvent =
   | { payload?: undefined; session_id?: string; type: 'message.start' }
   | { payload: { text?: string }; session_id?: string; type: 'message.user' }
   | { payload?: { kind?: string; text?: string }; session_id?: string; type: 'status.update' }
+  | { payload?: { controller?: string }; session_id?: string; type: 'control.update' }
   | {
       payload?: {
         id?: string

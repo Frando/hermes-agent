@@ -160,6 +160,8 @@ export interface UiState {
   busy: boolean
   busyInputMode: BusyInputMode
   compact: boolean
+  /** When a shared-session joiner holds control, their name; else null (host). */
+  controlHolder: string | null
   detailsMode: DetailsMode
   detailsModeCommandOverride: boolean
   info: null | SessionInfo
