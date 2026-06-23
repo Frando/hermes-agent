@@ -271,6 +271,7 @@ export function useMainApp(gw: GatewayClient) {
   })
 
   const { actions: composerActions, refs: composerRefs, state: composerState } = composer
+
   const empty = !historyItems.some(msg => msg.kind !== 'intro')
 
   useEffect(() => {

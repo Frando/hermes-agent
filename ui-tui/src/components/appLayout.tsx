@@ -364,6 +364,7 @@ const StatusRulePane = memo(function StatusRulePane({
         bgCount={ui.bgTasks.size}
         busy={ui.busy}
         cols={composer.cols}
+        controlHolder={ui.controlHolder}
         cwdLabel={status.cwdLabel}
         indicatorStyle={ui.indicatorStyle}
         lastTurnEndedAt={status.lastTurnEndedAt}

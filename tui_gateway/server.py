@@ -26,6 +26,7 @@ from hermes_constants import (
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tui_gateway.transport import (
+    FanoutTransport,
     StdioTransport,
     Transport,
     bind_transport,
@@ -182,6 +183,7 @@ _LONG_HANDLERS = frozenset(
         "session.compress",
         "session.resume",
         "shell.exec",
+        "share.start",
         "skills.manage",
         "slash.exec",
     }
@@ -225,6 +227,10 @@ _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
 # the gateway in-process and captures stdout into logs, so stale JSON-RPC frames
 # must not fall through there while the session waits for resume or reap.
 _detached_ws_transport = _DropTransport()
+
+# Set by entry._install_iroh_share for the TUI gateway; holds the process-wide
+# IrohShareHost that share.start/stop/status drive to share individual sessions.
+_iroh_share_host = None
 
 
 class _SlashWorker:
@@ -652,6 +658,129 @@ def _transport_is_dead(transport) -> bool:
     if transport is _detached_ws_transport:
         return True
     return getattr(transport, "_closed", None) is True
+
+
+def enable_sharing_fanout() -> "FanoutTransport":
+    """Upgrade the process stdio transport to a fan-out so sessions can be shared.
+
+    Idempotent. After this, every session created on the stdio path holds the
+    fan-out as its transport slot, so additional clients can attach without
+    stealing the host's event stream. Called once when the gateway starts in
+    share mode; a no-op (and never reached) for an unshared gateway.
+    """
+    global _stdio_transport
+    if not isinstance(_stdio_transport, FanoutTransport):
+        _stdio_transport = FanoutTransport(_stdio_transport)
+    return _stdio_transport
+
+
+def attach_shared_transport(transport: Transport) -> None:
+    """Add a client transport to the shared fan-out (no-op if not sharing)."""
+    if isinstance(_stdio_transport, FanoutTransport):
+        _stdio_transport.add(transport)
+
+
+def detach_shared_transport(transport: Transport) -> None:
+    """Remove a client transport from the shared fan-out (no-op if not sharing)."""
+    if isinstance(_stdio_transport, FanoutTransport):
+        _stdio_transport.remove(transport)
+
+
+def active_shared_session_id() -> Optional[str]:
+    """Return the most recently active live session id, or None.
+
+    A joiner attaches to this session (the acceptor hands it back in the
+    welcome so the remote TUI resumes the host's session rather than creating
+    its own).
+    """
+    with _sessions_lock:
+        best_sid: Optional[str] = None
+        best_at = -1.0
+        for sid, session in _sessions.items():
+            if session.get("_finalized"):
+                continue
+            active_at = float(session.get("last_active") or session.get("created_at") or 0.0)
+            if active_at >= best_at:
+                best_sid, best_at = sid, active_at
+        return best_sid
+
+
+def shared_session_handle() -> Optional[tuple[str, str]]:
+    """Return ``(ephemeral_id, resume_key)`` for the session a joiner should share.
+
+    ``ephemeral_id`` is the ``_sessions`` key used by prompt.submit and carried
+    on events; ``resume_key`` is the persistent session key (the DB id) a joiner
+    passes to ``session.resume`` to reattach to this exact live session. A DB row
+    is ensured so the resume's ``db.get_session`` lookup succeeds even before the
+    host has sent a prompt. Returns None when there is no live session to share.
+    """
+    sid = active_shared_session_id()
+    if not sid:
+        return None
+    with _sessions_lock:
+        session = _sessions.get(sid)
+    if not session:
+        return None
+    try:
+        _ensure_session_db_row(session)
+    except Exception:
+        # A missing DB row makes the joiner's session.resume fail opaquely, so
+        # this is worth surfacing rather than hiding at debug.
+        logger.warning("share: could not ensure session db row", exc_info=True)
+    key = str(session.get("session_key") or "")
+    if not key:
+        return None
+    return sid, key
+
+
+def _bind_session_transport(session: dict, transport: Optional[Transport]) -> None:
+    """Point a session at ``transport``, preserving any active fan-out.
+
+    A plain session owns a single transport, so binding replaces it (the
+    historical behavior: whichever client last submitted/resumed owns the event
+    stream). When the session is shared, its slot holds a
+    :class:`FanoutTransport`; binding then ADDS the client as an extra member
+    instead of replacing the slot, so attaching a second client (an observer or
+    a remote controller) does not steal the stream from the others. This is the
+    only behavioral change the sharing feature makes to the session model, and
+    it is a no-op when sharing is inactive.
+    """
+    if transport is None:
+        return
+    current = session.get("transport")
+    if isinstance(current, FanoutTransport):
+        # The host's own rebind passes the fan-out itself (it is both the
+        # current_transport and the slot); adding it to its own members would
+        # recurse on write. Only genuine extra clients are added.
+        if transport is not current:
+            current.add(transport)
+    else:
+        session["transport"] = transport
+
+
+def _broadcast_user_turn(
+    session: dict, sid: str, text: Any, submitter: Optional[Transport]
+) -> None:
+    """Show a submitted prompt to the OTHER participants of a shared session.
+
+    Each client renders its own prompt optimistically, so the originator is
+    excluded to avoid a duplicate. A no-op for an unshared session (the slot is
+    not a fan-out), so the solo path is unaffected.
+    """
+    fanout = session.get("transport")
+    if not isinstance(fanout, FanoutTransport):
+        return
+    rendered = _inflight_text(text)
+    if not rendered:
+        return
+    fanout.write_to_others(
+        {
+            "jsonrpc": "2.0",
+            "method": "event",
+            "params": {"type": "message.user", "session_id": sid, "payload": {"text": rendered}},
+        },
+        submitter,
+    )
 
 
 def _session_is_evictable(sid: str, session: dict, now: float) -> bool:
@@ -4956,7 +5085,7 @@ def _live_session_payload(
         if cols is not None:
             session["cols"] = cols
         if transport is not None:
-            session["transport"] = transport
+            _bind_session_transport(session, transport)
         if touch:
             session["last_active"] = time.time()
         history = list(session.get("display_history_prefix") or []) + list(
@@ -6210,11 +6339,20 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    # When the session is shared, a single party holds control at a time. Gate
+    # every submitter (the host included, which drives through the stdio
+    # transport) on the shared controller so two panes cannot drive at once.
+    share = _iroh_share_host
+    if share is not None:
+        denied = share.control_denied(current_transport(), session.get("session_key"))
+        if denied:
+            return _err(rid, 4030, denied)
     # Re-bind to the current client transport for this request. This keeps
     # streaming events on the active websocket even if an earlier disconnect
-    # or fallback moved the session transport to stdio.
-    if (t := current_transport()) is not None:
-        session["transport"] = t
+    # or fallback moved the session transport to stdio. When the session is
+    # shared this adds the submitting client to the fan-out instead of stealing
+    # the stream from the other participants.
+    _bind_session_transport(session, current_transport())
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
@@ -6245,6 +6383,10 @@ def _(rid, params: dict) -> dict:
         session["running"] = True
         session["last_active"] = time.time()
         _start_inflight_turn(session, text)
+
+    # If shared, echo this prompt to the other participants so they see it
+    # inline (each client renders its own prompt locally, so exclude the sender).
+    _broadcast_user_turn(session, sid, text, current_transport())
 
     # Persist the DB row lazily, now that the user has actually sent a message.
     _ensure_session_db_row(session)
@@ -8922,6 +9064,18 @@ def _(rid, params: dict) -> dict:
     except Exception:
         pass
 
+    # ── Share control ────────────────────────────────────────────────
+    # The host (local share pane) reaches command.dispatch directly; a joiner's
+    # /grab is intercepted earlier by the iroh acceptor. So this branch is the
+    # host taking control back.
+    if name == "grab":
+        share = _iroh_share_host
+        key = str(session.get("session_key") or "") if session else ""
+        if share is None or not key or not share.is_shared(key):
+            return _ok(rid, {"type": "exec", "output": "This session is not being shared."})
+        share.grab_host(key)
+        return _ok(rid, {"type": "exec", "output": "You now control this session. Type to drive the agent."})
+
     # ── Commands that queue messages onto _pending_input in the CLI ───
     # In the TUI the slash worker subprocess has no reader for that queue,
     # so we handle them here and return a structured payload.
@@ -9173,6 +9327,88 @@ def _(rid, params: dict) -> dict:
             )
 
     return _err(rid, 4018, f"not a quick/plugin/skill command: {name}")
+
+
+
+
+def _session_key_from_params(params: dict) -> tuple[Optional[dict], str]:
+    session = _sessions.get(params.get("session_id", ""))
+    key = str(session.get("session_key") or "") if session else ""
+    return session, key
+
+
+@method("share.start")
+def _(rid, params: dict) -> dict:
+    """Start sharing the current session; return and print its join tickets.
+
+    Sessions start unshared. This mints a watch and a control token for this
+    session, binds the shared iroh endpoint on first use, and registers the
+    tokens so a joiner presenting one is pinned to this session.
+    """
+    host = _iroh_share_host
+    if host is None:
+        return _err(rid, 4001, "sharing is not available in this build")
+    # Only the host may share a session. A joiner cannot reach this (it is not in
+    # the acceptor's read-only allow-list), but refuse defensively in any case.
+    if current_transport() is not _stdio_transport:
+        return _err(rid, 4030, "only the host can share a session")
+    session, key = _session_key_from_params(params)
+    if session is None:
+        return _err(rid, 4004, "no such session")
+    if not key:
+        return _err(rid, 4004, "session has no persistent key yet")
+    try:
+        _ensure_session_db_row(session)
+    except Exception:
+        logger.warning("share: could not ensure session db row", exc_info=True)
+    try:
+        watch, control = host.share_session(params.get("session_id", ""), key)
+    except Exception as exc:
+        logger.warning("share: failed to start sharing: %s", exc)
+        return _err(rid, 5001, f"could not start sharing: {exc}")
+    # The tickets ride back in this response (host transport only; responses are
+    # not fanned out to joiners), and the TUI's /share prints them. No share.info
+    # event: there is no longer a startup auto-share that would need a banner.
+    return _ok(rid, {"sharing": True, "watch": watch, "control": control})
+
+
+@method("share.stop")
+def _(rid, params: dict) -> dict:
+    """Stop sharing the current session and disconnect its joiners.
+
+    Host-only: a joiner (even one holding control) must not be able to unshare
+    the host's session out from under everyone. A joiner drives through its own
+    client transport, never the process stdio transport, so the check below
+    rejects it.
+    """
+    host = _iroh_share_host
+    if host is None:
+        return _err(rid, 4001, "sharing is not available in this build")
+    if current_transport() is not _stdio_transport:
+        return _err(rid, 4030, "only the host can stop sharing a session")
+    _session, key = _session_key_from_params(params)
+    was = bool(key and host.unshare_session(key))
+    return _ok(rid, {"sharing": False, "was_sharing": was})
+
+
+@method("share.status")
+def _(rid, params: dict) -> dict:
+    """Report whether the current session is shared, with its tickets.
+
+    The control ticket is returned only to the host transport; a joiner that
+    reaches this method gets the watch ticket alone, so it cannot capture the
+    control token.
+    """
+    host = _iroh_share_host
+    _session, key = _session_key_from_params(params)
+    tickets = host.session_tickets(key) if (host is not None and key) else None
+    if not tickets:
+        return _ok(rid, {"sharing": False})
+    watch, control = tickets
+    result = {"sharing": True, "watch": watch}
+    if current_transport() is _stdio_transport:
+        result["control"] = control
+    return _ok(rid, result)
 
 
 # ── Methods: paste ────────────────────────────────────────────────────

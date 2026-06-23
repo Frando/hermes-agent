@@ -48,6 +48,48 @@ def _install_sidecar_publisher() -> None:
     )
 
 
+def _install_iroh_share() -> None:
+    """Make session sharing available; the user shares per-session with ``/share``.
+
+    Upgrades the process stdio transport to a fan-out so any session can take on
+    joiners, and creates the share host. The iroh endpoint is NOT bound here: it
+    binds lazily the first time a session is shared with ``/share``, so a user who
+    never shares pays no iroh cost. Every ``hermes --tui`` session can share
+    itself; there is no separate launch command. Best-effort: a setup failure
+    never breaks the TUI.
+    """
+    try:
+        server.enable_sharing_fanout()
+    except Exception:
+        logger.warning(
+            "iroh share: failed to enable session fan-out; sharing disabled",
+            exc_info=True,
+        )
+        return
+
+    import atexit
+
+    try:
+        from tui_gateway.iroh_share import IrohShareHost
+
+        server._iroh_share_host = IrohShareHost()
+    except Exception:
+        logger.warning("iroh share: failed to create share host", exc_info=True)
+        return
+
+    def _stop_share_host() -> None:
+        # Close the iroh endpoint on a clean exit so the relay drops our mapping
+        # and in-flight joiners are torn down rather than abandoned.
+        host = getattr(server, "_iroh_share_host", None)
+        if host is not None:
+            try:
+                host.stop()
+            except Exception:
+                logger.debug("iroh share: stop failed", exc_info=True)
+
+    atexit.register(_stop_share_host)
+
+
 # How long to wait for orderly shutdown (atexit + finalisers) before
 # falling back to ``os._exit(0)`` so a wedged worker mid-flush can't
 # strand the process.  1s covers the gateway's own shutdown work
@@ -262,6 +304,7 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
 
 def main():
     _install_sidecar_publisher()
+    _install_iroh_share()
 
     # MCP tool discovery — runs in a background daemon thread so a slow or
     # unreachable MCP server can't freeze TUI startup.  Previously this ran

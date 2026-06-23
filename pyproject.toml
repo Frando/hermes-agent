@@ -102,6 +102,9 @@ dependencies = [
   # Browser CDP supervisor + browser_dialog import this directly. Keep core
   # so browser tool discovery doesn't fail on lean installs.
   "websockets==15.0.1",
+  # Peer-to-peer session sharing (`hermes share` / `hermes join`, the iroh
+  # transport in tui_gateway). A core dependency so sharing always works.
+  "iroh==1.0.0",
   # .gitignore-aware file matching for desktop build stamp.
   "pathspec==1.1.1",
   "fastapi>=0.104.0,<1",

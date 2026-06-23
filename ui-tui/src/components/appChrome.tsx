@@ -421,6 +421,7 @@ export function StatusRule({
   showCost,
   turnStartedAt,
   voiceLabel,
+  controlHolder,
   onSessionCountClick,
   t
 }: StatusRuleProps) {
@@ -480,6 +481,7 @@ export function StatusRule({
   // mid-segment, so status/model/context are never crushed.
   const SEP = stringWidth(' │ ')
   let tailBudget = Math.max(0, leftWidth - essentialWidth)
+
   const fits = (w: number) => {
     if (tailBudget >= w) {
       tailBudget -= w
@@ -493,6 +495,7 @@ export function StatusRule({
   const sessionCountText = liveSessionCount > 0 ? statusSessionCountLabel(liveSessionCount) : ''
   const compressions = typeof usage.compressions === 'number' ? usage.compressions : 0
   const costText = typeof usage.cost_usd === 'number' ? `$${usage.cost_usd.toFixed(4)}` : ''
+
   // Dev-only readout (HERMES_DEV_CREDITS). The server omits the key entirely unless the
   // flag is on, so this segment self-hides for normal users. micros→cents is allowed money
   // math (display formatting) — never parseFloat a *_usd. Signed: a mid-session top-up that
@@ -510,6 +513,10 @@ export function StatusRule({
   const showIdle = segs.duration && !busy && lastTurnEndedAt != null && fits(SEP + stringWidth('✓ ') + MAX_DURATION_WIDTH)
   const showCompressions = segs.compressions && compressions > 0 && fits(SEP + stringWidth(`cmp ${compressions}`))
   const showVoice = segs.voice && !!voiceLabel && fits(SEP + stringWidth(voiceLabel))
+  // A shared-session joiner is driving: surface it so the host knows it is not
+  // in control. High priority (right after voice) — it changes who drives.
+  const controlText = controlHolder ? `⮂ ${controlHolder} drives` : ''
+  const showControl = !!controlText && fits(SEP + stringWidth(controlText))
   const showSessionCount = !!sessionCountText && fits(SEP + stringWidth(sessionCountText))
   const showBg = segs.bg && bgCount > 0 && fits(SEP + stringWidth(`${bgCount} bg`))
   const showCostSeg = segs.cost && showCost && !!costText && fits(SEP + stringWidth(costText))
@@ -610,6 +617,12 @@ export function StatusRule({
           >
             {' │ '}
             {voiceLabel}
+          </Text>
+        ) : null}
+        {showControl ? (
+          <Text color={t.color.warn} wrap="truncate-end">
+            {' │ '}
+            {controlText}
           </Text>
         ) : null}
         {showSessionCount ? sessionCountNode : null}
@@ -769,6 +782,7 @@ interface StatusRuleProps {
   turnStartedAt?: null | number
   usage: Usage
   voiceLabel?: string
+  controlHolder?: null | string
   onSessionCountClick?: () => void
 }
 

@@ -53,6 +53,13 @@ export interface CreditsViewResponse {
   topup_url: string | null
 }
 
+export interface ShareTicketsResponse {
+  control?: string
+  sharing: boolean
+  was_sharing?: boolean
+  watch?: string
+}
+
 // ── Terminal billing (Phase 2b) ──────────────────────────────────────
 
 export interface BillingCardInfo {
@@ -613,7 +620,9 @@ export type GatewayEvent =
   | { payload: SessionInfo; session_id?: string; type: 'session.info' }
   | { payload?: { text?: string }; session_id?: string; type: 'thinking.delta' }
   | { payload?: undefined; session_id?: string; type: 'message.start' }
+  | { payload: { text?: string }; session_id?: string; type: 'message.user' }
   | { payload?: { kind?: string; text?: string }; session_id?: string; type: 'status.update' }
+  | { payload?: { controller?: string }; session_id?: string; type: 'control.update' }
   | {
       payload?: {
         id?: string

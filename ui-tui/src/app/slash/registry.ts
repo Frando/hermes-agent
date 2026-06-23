@@ -1,10 +1,11 @@
-import { coreCommands } from './commands/core.js'
 import { billingCommands } from './commands/billing.js'
+import { coreCommands } from './commands/core.js'
 import { creditsCommands } from './commands/credits.js'
 import { debugCommands } from './commands/debug.js'
 import { opsCommands } from './commands/ops.js'
 import { sessionCommands } from './commands/session.js'
 import { setupCommands } from './commands/setup.js'
+import { shareCommands } from './commands/share.js'
 import type { SlashCommand } from './types.js'
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -14,7 +15,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   ...sessionCommands,
   ...opsCommands,
   ...setupCommands,
-  ...debugCommands
+  ...debugCommands,
+  ...shareCommands
 ]
 
 const byName = new Map<string, SlashCommand>(

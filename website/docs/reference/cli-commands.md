@@ -52,6 +52,7 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes secrets` | Manage external secret sources (currently Bitwarden Secrets Manager) for pulling API keys at process startup instead of from `~/.hermes/.env`. |
 | `hermes migrate` | Diagnose and (optionally) rewrite `config.yaml` to replace references to retired models or deprecated settings (e.g. `migrate xai`). |
 | `hermes status` | Show agent, auth, and platform status. |
+| `hermes join` | Attach the TUI to a session shared with `/share`, watching live or (with a control ticket) taking control. See [Session sharing](../user-guide/session-sharing.md). |
 | `hermes cron` | Inspect and tick the cron scheduler. |
 | `hermes kanban` | Multi-profile collaboration board (tasks, links, dispatcher). |
 | `hermes webhook` | Manage dynamic webhook subscriptions for event-driven activation. |

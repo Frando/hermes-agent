@@ -217,3 +217,136 @@ class TeeTransport:
                     sec.close()
                 except Exception:
                     pass
+
+
+class FanoutTransport:
+    """A primary transport plus a runtime-mutable set of extra members.
+
+    Unlike :class:`TeeTransport`, whose secondaries are fixed at construction,
+    a fan-out lets clients attach to and detach from one shared stream at
+    runtime. This is how more than one client observes a single gateway
+    session: the session's owning client is the primary, and each additional
+    client (an observer or a remote controller) is an extra member.
+
+    ``write`` returns the primary's result, so the session's liveness still
+    tracks its owner; extra members get best-effort copies and are pruned the
+    moment a write to them fails or raises. ``close`` releases the extras but
+    deliberately leaves the primary open, because the primary is typically the
+    process-wide stdio transport that must outlive any one session.
+    """
+
+    __slots__ = ("_primary", "_extras", "_lock", "_closed")
+
+    def __init__(self, primary: "Transport") -> None:
+        self._primary = primary
+        self._extras: list["Transport"] = []
+        self._lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def primary(self) -> "Transport":
+        return self._primary
+
+    @staticmethod
+    def _broadcastable(obj: dict) -> bool:
+        """Whether a frame may be forwarded to extra members (joiners).
+
+        Extras receive only events the host emits, never responses to the host's
+        own requests. A response carries an ``id`` and no ``method`` and may hold
+        host-only data (API keys from ``config.get``, the control ticket from
+        ``share.start``); fanning it out would leak it to every attached joiner.
+        Each joiner still receives responses to ITS OWN requests directly, since
+        those are written to its transport, not through this fan-out.
+        """
+        if not isinstance(obj, dict):
+            return True
+        return obj.get("method") is not None
+
+    def add(self, transport: "Transport") -> None:
+        """Attach an extra member. Adding the primary, self, or a duplicate is a no-op."""
+        if transport is self._primary or transport is self:
+            return
+        with self._lock:
+            if transport not in self._extras:
+                self._extras.append(transport)
+
+    def remove(self, transport: "Transport") -> None:
+        """Detach a member if present."""
+        with self._lock:
+            try:
+                self._extras.remove(transport)
+            except ValueError:
+                pass
+
+    def write(self, obj: dict) -> bool:
+        ok = self._primary.write(obj)
+        if not self._broadcastable(obj):
+            return ok
+        with self._lock:
+            extras = list(self._extras)
+        dead: list["Transport"] = []
+        for member in extras:
+            try:
+                if not member.write(obj):
+                    dead.append(member)
+            except Exception:
+                # A raised write (vs. a False return) is an unexpected member
+                # fault, not a clean disconnect: log before pruning so it isn't
+                # silently indistinguishable from a peer going away.
+                logger.warning("fanout: dropping member after write error", exc_info=True)
+                dead.append(member)
+        if dead:
+            with self._lock:
+                for member in dead:
+                    try:
+                        self._extras.remove(member)
+                    except ValueError:
+                        pass
+        return ok
+
+    def write_to_others(self, obj: dict, exclude: "Transport") -> None:
+        """Write to every member except ``exclude`` (best-effort).
+
+        Used to echo one client's action (a submitted prompt) to the other
+        participants without sending it back to the originator, which has
+        already rendered it locally. Passing the fan-out itself (or its primary)
+        as ``exclude`` skips the primary, which is how the host's own submit
+        reaches the joiners but not the host.
+        """
+        if exclude is not self._primary and exclude is not self:
+            try:
+                self._primary.write(obj)
+            except Exception:
+                logger.warning("fanout: primary write failed", exc_info=True)
+        if not self._broadcastable(obj):
+            return
+        with self._lock:
+            extras = list(self._extras)
+        dead: list["Transport"] = []
+        for member in extras:
+            if member is exclude:
+                continue
+            try:
+                if not member.write(obj):
+                    dead.append(member)
+            except Exception:
+                logger.warning("fanout: dropping member after write error", exc_info=True)
+                dead.append(member)
+        if dead:
+            with self._lock:
+                for member in dead:
+                    try:
+                        self._extras.remove(member)
+                    except ValueError:
+                        pass
+
+    def close(self) -> None:
+        self._closed = True
+        with self._lock:
+            extras = list(self._extras)
+            self._extras.clear()
+        for member in extras:
+            try:
+                member.close()
+            except Exception:
+                pass
